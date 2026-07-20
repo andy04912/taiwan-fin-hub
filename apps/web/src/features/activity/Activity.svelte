@@ -25,6 +25,9 @@
   import Button from "../../components/ui/Button.svelte";
   import Checkbox from "../../components/ui/Checkbox.svelte";
   import EmptyState from "../../components/ui/EmptyState.svelte";
+  import Metric from "../../components/ui/Metric.svelte";
+  import PageSkeleton from "../../components/ui/PageSkeleton.svelte";
+  import SummaryStrip from "../../components/ui/SummaryStrip.svelte";
   import Badge from "../../components/ui/Badge.svelte";
   import Input from "../../components/ui/Input.svelte";
   import Select from "../../components/ui/Select.svelte";
@@ -540,59 +543,41 @@
   }
 </script>
 
-{#if $bank.isPending || $invoices.isPending || $invoiceMappings.isPending || $trades.isPending}<EmptyState
-    title="載入活動中"
-    body="正在整理銀行、投資與發票資料。"
-  />{:else}
-  <div class="grid min-w-0 max-w-full gap-5 overflow-x-clip">
-    <div
-      class="hidden min-w-0 grid-cols-2 gap-3 md:grid md:grid-cols-4 md:gap-4"
-    >
-      <Card
-        ><CardContent class="p-5"
-          ><p class="text-xs font-semibold text-ink/50">
-            {selectedMonthLabel}收入
-          </p>
-          <p class="mt-2 truncate text-2xl font-bold text-moss">
-            +{formatCurrency(incomeTotal)}
-          </p>
-          <p class="mt-1 text-xs text-ink/45">銀行與信用卡活動</p></CardContent
-        ></Card
-      >
-      <Card
-        ><CardContent class="p-5"
-          ><p class="text-xs font-semibold text-ink/50">
-            {selectedMonthLabel}支出
-          </p>
-          <p class="mt-2 truncate text-2xl font-bold text-coral">
-            −{formatCurrency(expenseTotal)}
-          </p>
-          <p class="mt-1 text-xs text-ink/45">
-            含未配對發票，不計入已排除活動
-          </p></CardContent
-        ></Card
-      >
-      <Card
-        ><CardContent class="p-5"
-          ><p class="text-xs font-semibold text-ink/50">
-            {selectedMonthLabel}淨流入
-          </p>
-          <p
-            class={`mt-2 truncate text-2xl font-bold ${incomeTotal >= expenseTotal ? "text-moss" : "text-coral"}`}
-          >
-            {formatCurrency(incomeTotal - expenseTotal)}
-          </p>
-          <p class="mt-1 text-xs text-ink/45">收入 − 支出</p></CardContent
-        ></Card
-      >
-      <Card
-        ><CardContent class="p-5"
-          ><p class="text-xs font-semibold text-ink/50">待分類</p>
-          <p class="mt-2 text-2xl font-bold">{pendingCount} 筆</p>
-          <p class="mt-1 text-xs text-ink/45">銀行交易</p></CardContent
-        ></Card
-      >
-    </div>
+{#if $bank.isPending || $invoices.isPending || $invoiceMappings.isPending || $trades.isPending}
+  <PageSkeleton />
+{:else if $bank.isError || $invoices.isError || $invoiceMappings.isError || $trades.isError}
+  <EmptyState
+    title="無法載入活動"
+    body="部分財務來源暫時無法讀取，請稍後重新整理。"
+  />
+{:else}
+  <div class="c-page-grid max-w-full overflow-x-clip">
+    <SummaryStrip>
+      <Metric
+        label={`${selectedMonthLabel}收入`}
+        value={`+${formatCurrency(incomeTotal)}`}
+        detail="銀行與信用卡活動"
+        tone="positive"
+      />
+      <Metric
+        label={`${selectedMonthLabel}支出`}
+        value={`−${formatCurrency(expenseTotal)}`}
+        detail="已排除項目不計入"
+        tone="negative"
+      />
+      <Metric
+        label={`${selectedMonthLabel}淨流入`}
+        value={formatCurrency(incomeTotal - expenseTotal)}
+        detail="收入減支出"
+        tone={incomeTotal >= expenseTotal ? "positive" : "negative"}
+      />
+      <Metric
+        label="待分類"
+        value={`${pendingCount} 筆`}
+        detail="銀行交易"
+        tone={pendingCount ? "warning" : "neutral"}
+      />
+    </SummaryStrip>
 
     <section class="grid min-w-0 gap-3">
       <div

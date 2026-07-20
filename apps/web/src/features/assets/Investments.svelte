@@ -7,6 +7,9 @@
   import EmptyState from "../../components/ui/EmptyState.svelte";
   import Input from "../../components/ui/Input.svelte";
   import Select from "../../components/ui/Select.svelte";
+  import Metric from "../../components/ui/Metric.svelte";
+  import PageSkeleton from "../../components/ui/PageSkeleton.svelte";
+  import SummaryStrip from "../../components/ui/SummaryStrip.svelte";
   import type { ApiClient } from "../../lib/api";
   import {
     exchangeRatesQuery,
@@ -62,26 +65,32 @@
   }
 </script>
 
-{#if $investments.isPending}<EmptyState
-    title="載入投資中"
-    body="正在讀取投資持倉。"
-  />{:else}<div class="grid gap-5">
-    <div class="grid grid-cols-2 gap-3 md:grid-cols-3">
-      <div class="rounded-xl border border-ink/10 bg-white p-4 shadow-xs">
-        <p class="text-xs text-ink/45">持倉市值</p>
-        <p class="mt-2 text-xl font-bold">{formatCurrency(total)}</p>
-      </div>
-      <div class="rounded-xl border border-ink/10 bg-white p-4 shadow-xs">
-        <p class="text-xs text-ink/45">持倉數</p>
-        <p class="mt-2 text-xl font-bold">{positions.length}</p>
-      </div>
-      <div
-        class="hidden rounded-xl border border-ink/10 bg-white p-4 shadow-xs md:block"
-      >
-        <p class="text-xs text-ink/45">交易筆數</p>
-        <p class="mt-2 text-xl font-bold">{$trades.data?.length ?? 0}</p>
-      </div>
-    </div>
+{#if $investments.isPending || $trades.isPending}
+  <PageSkeleton />
+{:else if $investments.isError || $trades.isError}
+  <EmptyState
+    title="無法載入投資"
+    body="請稍後再試，或確認投資來源的同步狀態。"
+  />
+{:else}<div class="c-page-grid">
+    <SummaryStrip class="md:grid-cols-3 md:[&>*]:pl-5">
+      <Metric
+        label="持倉市值"
+        value={formatCurrency(total)}
+        detail="換算為新台幣"
+        tone="brand"
+      />
+      <Metric
+        label="持倉數"
+        value={String(positions.length)}
+        detail="符合目前搜尋"
+      />
+      <Metric
+        label="交易筆數"
+        value={String($trades.data?.length ?? 0)}
+        detail="所有投資紀錄"
+      />
+    </SummaryStrip>
     <Card
       ><CardHeader class="gap-3"
         ><div class="flex flex-wrap items-center justify-between gap-3">

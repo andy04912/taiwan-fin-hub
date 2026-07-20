@@ -6,6 +6,10 @@
   import CardHeader from "../../components/ui/CardHeader.svelte";
   import CardContent from "../../components/ui/CardContent.svelte";
   import EmptyState from "../../components/ui/EmptyState.svelte";
+  import Metric from "../../components/ui/Metric.svelte";
+  import PageSkeleton from "../../components/ui/PageSkeleton.svelte";
+  import SummaryStrip from "../../components/ui/SummaryStrip.svelte";
+  import Surface from "../../components/ui/Surface.svelte";
   import TabsList from "../../components/ui/TabsList.svelte";
   import TabsTrigger from "../../components/ui/TabsTrigger.svelte";
   import type { ApiClient } from "../../lib/api";
@@ -150,46 +154,77 @@
 </script>
 
 {#if loading}
-  <EmptyState
-    title="載入資產中"
-    body="正在彙整銀行、信用卡、投資與其他資產。"
-  />
+  <PageSkeleton />
 {:else if failed}
   <EmptyState
     title="無法載入資產"
     body="請稍後再試，或確認 Worker API 是否可用。"
   />
 {:else}
-  <div class="grid min-w-0 max-w-full gap-5">
-    <section class="rounded-2xl bg-ink p-5 text-white shadow-xs md:hidden">
-      <p class="text-xs font-semibold tracking-wide text-white/60">
-        {mobileSummary.label}
-      </p>
-      <p
-        class="mt-2 break-words text-3xl font-bold tracking-tight tabular-nums"
-      >
-        {formatCurrency(mobileSummary.value)}
-      </p>
-      <p class="mt-2 text-xs text-white/60">{mobileSummary.detail}</p>
-    </section>
-
-    <div class="hidden gap-4 md:grid md:grid-cols-2 xl:grid-cols-4">
-      {#each [{ label: "資產總額", value: grossAssets, detail: "不含信用卡負債", tone: "" }, { label: "銀行與現金", value: bankTotal, detail: `${deposits.length} 個帳戶`, tone: "text-moss" }, { label: "投資", value: investmentTotal, detail: `${$investments.data?.length ?? 0} 個持倉`, tone: "text-steel" }, { label: "信用卡負債", value: -cardDebt, detail: `${cards.length} 張卡片`, tone: "text-coral" }] as item (item.label)}
-        <Card
-          ><CardContent class="p-5"
-            ><p class="text-xs font-semibold text-ink/50">{item.label}</p>
-            <p
-              class={`mt-2 text-2xl font-bold tracking-tight tabular-nums ${item.tone}`}
-            >
-              {formatCurrency(item.value)}
-            </p>
-            <p class="mt-1 text-xs text-ink/45">{item.detail}</p></CardContent
-          ></Card
+  <div class="c-page-grid max-w-full">
+    <Surface tone="strong" class="p-5 md:p-6">
+      <div class="grid gap-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+        <div>
+          <p class="text-xs font-semibold text-white/60 md:hidden">
+            {mobileSummary.label}
+          </p>
+          <p class="hidden text-xs font-semibold text-white/60 md:block">
+            淨資產
+          </p>
+          <p
+            class="mt-2 break-words text-3xl font-bold tracking-[-0.035em] tabular-nums md:text-[38px]"
+          >
+            {formatCurrency(section === "all" ? netWorth : mobileSummary.value)}
+          </p>
+          <p class="mt-2 text-xs text-white/60 md:hidden">
+            {mobileSummary.detail}
+          </p>
+          <p class="mt-2 hidden text-sm text-white/60 md:block">
+            全部資產扣除信用卡負債後的目前價值
+          </p>
+        </div>
+        <div
+          class="grid grid-cols-2 gap-6 border-t border-white/10 pt-4 md:border-l md:border-t-0 md:pl-6 md:pt-0"
         >
-      {/each}
-    </div>
+          <div>
+            <p class="text-xs text-white/50">資產總額</p>
+            <p class="mt-1 font-bold tabular-nums">
+              {formatCurrency(grossAssets)}
+            </p>
+          </div>
+          <div>
+            <p class="text-xs text-white/50">信用卡負債</p>
+            <p class="mt-1 font-bold tabular-nums text-rose-300">
+              {formatCurrency(cardDebt)}
+            </p>
+          </div>
+        </div>
+      </div>
+    </Surface>
 
-    <TabsList class="grid h-auto w-full grid-cols-5 bg-card shadow-xs">
+    <SummaryStrip class="md:grid-cols-3 md:[&>*]:pl-5">
+      <Metric
+        label="銀行與現金"
+        value={formatCurrency(bankTotal)}
+        detail={`${deposits.length} 個帳戶`}
+        tone="positive"
+      />
+      <Metric
+        label="投資市值"
+        value={formatCurrency(investmentTotal)}
+        detail={`${$investments.data?.length ?? 0} 個持倉`}
+        tone="brand"
+      />
+      <Metric
+        label="其他資產"
+        value={formatCurrency(manualTotal)}
+        detail={`${$manual.data?.length ?? 0} 筆估值`}
+      />
+    </SummaryStrip>
+
+    <TabsList
+      class="c-scroll-shadow no-scrollbar grid h-auto w-full grid-cols-5 overflow-x-auto border border-border bg-card p-1"
+    >
       {#each tabs as tab (tab.key)}
         <TabsTrigger
           class={`min-h-10 min-w-0 px-1 text-xs sm:text-sm ${section === tab.key ? "bg-ink text-white" : ""}`}

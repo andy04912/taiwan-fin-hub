@@ -8,11 +8,12 @@
   --breakpoint-xl: 1200px;
   --breakpoint-2xl: 1536px;
 
-  --color-ink: #1f2933;
-  --color-paper: #f7f7f2;
-  --color-moss: #556b2f;
-  --color-coral: #b75b45;
-  --color-steel: #3e6f7c;
+  --color-ink: #18262d;
+  --color-paper: #f4f6f4;
+  --color-moss: #397356;
+  --color-coral: #b65342;
+  --color-steel: #287080;
+  --color-warning: #a76618;
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));
   --color-card: hsl(var(--card));
@@ -62,25 +63,33 @@
 
 @layer utilities {
   :root {
-    --background: 60 24% 96%;
-    --foreground: 210 24% 16%;
+    --background: 120 10% 96%;
+    --foreground: 198 30% 14%;
     --card: 0 0% 100%;
     --card-foreground: 210 24% 16%;
     --popover: 0 0% 100%;
     --popover-foreground: 210 24% 16%;
-    --primary: 192 33% 36%;
+    --primary: 190 52% 33%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 60 14% 93%;
+    --secondary: 150 9% 92%;
     --secondary-foreground: 210 24% 16%;
-    --muted: 60 12% 94%;
-    --muted-foreground: 210 10% 45%;
-    --accent: 192 24% 92%;
-    --accent-foreground: 192 38% 28%;
+    --muted: 150 8% 94%;
+    --muted-foreground: 198 11% 42%;
+    --accent: 188 24% 91%;
+    --accent-foreground: 190 50% 25%;
     --destructive: 11 45% 49%;
     --destructive-foreground: 0 0% 100%;
-    --input: 210 18% 88%;
-    --border: 210 18% 88%;
-    --ring: 192 33% 36%;
+    --input: 190 13% 84%;
+    --border: 190 12% 86%;
+    --ring: 190 52% 33%;
+    --surface: #ffffff;
+    --surface-subtle: #eef2ef;
+    --canvas: #f4f6f4;
+    --ink-muted: #5d6b70;
+    --chart-1: #287080;
+    --chart-2: #65824c;
+    --chart-3: #b87652;
+    --chart-4: #756b9b;
   }
 
   * {
@@ -96,14 +105,16 @@
   body {
     margin: 0;
     font-family:
-      Inter,
+      "Noto Sans TC",
+      "PingFang TC",
+      "Microsoft JhengHei",
       ui-sans-serif,
       system-ui,
       -apple-system,
       BlinkMacSystemFont,
       "Segoe UI",
       sans-serif;
-    text-rendering: geometricPrecision;
+    text-rendering: optimizeLegibility;
     color: hsl(var(--foreground));
     background: hsl(var(--background));
   }
@@ -133,6 +144,75 @@
 
   button {
     -webkit-tap-highlight-color: transparent;
+  }
+
+  ::selection {
+    color: #fff;
+    background: #287080;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums slashed-zero;
+  }
+}
+
+@layer components {
+  .c-page-grid {
+    display: grid;
+    min-width: 0;
+    gap: 1.25rem;
+  }
+
+  .c-section-title {
+    font-size: 1rem;
+    line-height: 1.5rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+
+  .c-data-row {
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease;
+  }
+
+  .c-data-row:hover {
+    background: color-mix(in srgb, var(--surface-subtle) 62%, transparent);
+  }
+
+  .c-scroll-shadow {
+    background:
+      linear-gradient(90deg, var(--surface) 30%, transparent),
+      linear-gradient(270deg, var(--surface) 30%, transparent) 100% 0,
+      radial-gradient(
+        farthest-side at 0 50%,
+        rgb(24 38 45 / 0.12),
+        transparent
+      ),
+      radial-gradient(
+          farthest-side at 100% 50%,
+          rgb(24 38 45 / 0.12),
+          transparent
+        )
+        100% 0;
+    background-repeat: no-repeat;
+    background-size:
+      2rem 100%,
+      2rem 100%,
+      0.75rem 100%,
+      0.75rem 100%;
+    background-attachment: local, local, scroll, scroll;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
