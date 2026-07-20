@@ -13,6 +13,9 @@
   import Button from "../../components/ui/Button.svelte";
   import Input from "../../components/ui/Input.svelte";
   import Select from "../../components/ui/Select.svelte";
+  import Metric from "../../components/ui/Metric.svelte";
+  import PageSkeleton from "../../components/ui/PageSkeleton.svelte";
+  import SummaryStrip from "../../components/ui/SummaryStrip.svelte";
   import type { ApiClient } from "../../lib/api";
   import { queryKeys } from "../../lib/api";
   import {
@@ -164,32 +167,40 @@
   }
 </script>
 
-{#if $bank.isPending}<EmptyState
-    title="載入銀行資料中"
-    body="正在讀取帳戶與交易。"
-  />{:else}<div class="grid gap-5">
-    <div class="grid grid-cols-2 gap-3 md:grid-cols-4">
-      <div class="rounded-xl border border-ink/10 bg-white p-4 shadow-xs">
-        <p class="text-xs text-ink/45">帳戶數</p>
-        <p class="mt-2 text-xl font-bold">{accounts.length}</p>
-      </div>
-      <div class="rounded-xl border border-ink/10 bg-white p-4 shadow-xs">
-        <p class="text-xs text-ink/45">帳戶餘額</p>
-        <p class="mt-2 text-xl font-bold">{formatCurrencyTotals(totals)}</p>
-      </div>
-      <div class="rounded-xl border border-ink/10 bg-white p-4 shadow-xs">
-        <p class="text-xs text-ink/45">本期收入</p>
-        <p class="mt-2 text-xl font-bold text-moss">
-          {formatCurrency(cashFlow.inflow)}
-        </p>
-      </div>
-      <div class="rounded-xl border border-ink/10 bg-white p-4 shadow-xs">
-        <p class="text-xs text-ink/45">本期支出</p>
-        <p class="mt-2 text-xl font-bold text-coral">
-          {formatCurrency(Math.abs(cashFlow.outflow))}
-        </p>
-      </div>
-    </div>
+{#if $bank.isPending}
+  <PageSkeleton />
+{:else if $bank.isError}
+  <EmptyState
+    title="無法載入銀行資料"
+    body="請稍後再試，或確認銀行來源的同步狀態。"
+  />
+{:else}<div class="c-page-grid">
+    <SummaryStrip>
+      <Metric
+        label="帳戶餘額"
+        value={formatCurrencyTotals(totals)}
+        detail={`${accounts.length} 個帳戶`}
+        tone="brand"
+      />
+      <Metric
+        label="本期收入"
+        value={formatCurrency(cashFlow.inflow)}
+        detail="已納入統計"
+        tone="positive"
+      />
+      <Metric
+        label="本期支出"
+        value={formatCurrency(Math.abs(cashFlow.outflow))}
+        detail="已納入統計"
+        tone="negative"
+      />
+      <Metric
+        label="淨現金流"
+        value={formatCurrency(cashFlow.inflow + cashFlow.outflow)}
+        detail={`${filtered.length} 筆符合條件`}
+        tone={cashFlow.inflow + cashFlow.outflow >= 0 ? "positive" : "negative"}
+      />
+    </SummaryStrip>
     <Card
       ><CardHeader class="gap-3"
         ><div class="flex flex-wrap items-center justify-between gap-3">

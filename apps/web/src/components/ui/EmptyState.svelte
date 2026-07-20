@@ -3,8 +3,12 @@
 </script>
 
 <section
-  class="rounded-xl border border-dashed border-ink/20 bg-white p-8 text-center shadow-xs"
+  class="rounded-xl border border-dashed border-border bg-white/55 p-8 text-center"
 >
   <h2 class="text-lg font-semibold">{title}</h2>
-  <p class="mt-2 text-sm text-ink/65">{body}</p>
+  <p
+    class="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground"
+  >
+    {body}
+  </p>
 </section>

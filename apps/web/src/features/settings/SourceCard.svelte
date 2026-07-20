@@ -1,12 +1,13 @@
 <script lang="ts">
-  import type { Snippet } from "svelte";
-  import { ChartCandlestick, Landmark, ReceiptText } from "@lucide/svelte";
+  import {
+    ChartCandlestick,
+    ChevronRight,
+    Landmark,
+    ReceiptText,
+  } from "@lucide/svelte";
   import { toStore } from "svelte/store";
   import { createQuery } from "@tanstack/svelte-query";
-  import Button from "../../components/ui/Button.svelte";
   import Badge from "../../components/ui/Badge.svelte";
-  import Card from "../../components/ui/Card.svelte";
-  import CardContent from "../../components/ui/CardContent.svelte";
   import type { ApiClient } from "../../lib/api";
   import { connectorSettingsQuery } from "../../lib/queries";
   import type { ConnectorId, SyncJobRow } from "../../lib/types";
@@ -19,7 +20,6 @@
     selected,
     onConfigure,
     jobs,
-    children,
   }: {
     api: ApiClient;
     id: ConnectorId;
@@ -28,7 +28,6 @@
     selected: boolean;
     onConfigure: () => void;
     jobs?: SyncJobRow[];
-    children?: Snippet;
   } = $props();
   const settings = createQuery(
     toStore(() => connectorSettingsQuery(() => api, id)),
@@ -62,59 +61,48 @@
   );
 </script>
 
-<Card
-  class={`transition duration-200 ${selected ? "sm:col-span-2 lg:col-span-3 2xl:col-span-5 border-steel/50 shadow-md ring-2 ring-steel/15" : "hover:-translate-y-0.5 hover:border-ink/20 hover:shadow-sm"}`}
-  ><CardContent class="pt-5"
-    ><div class="flex items-start justify-between gap-4">
-      <div class="flex min-w-0 items-start gap-3">
-        <span
-          class={`flex size-10 shrink-0 items-center justify-center rounded-xl ${selected ? "bg-steel text-white" : "bg-steel/10 text-steel"}`}
-        >
-          <SourceIcon class="size-5" />
-        </span>
-        <div class="min-w-0">
-          <h2 class="font-semibold">{title}</h2>
-          <p class="mt-0.5 text-sm text-muted-foreground">{description}</p>
-        </div>
-      </div>
-      <Badge
-        class="shrink-0 whitespace-nowrap"
-        variant={needsAction
-          ? "destructive"
-          : $settings.data?.configured
-            ? "success"
-            : "secondary"}
-        >{needsAction
-          ? "需要處理"
-          : $settings.data?.configured
-            ? "已設定"
-            : "未設定"}</Badge
-      >
-    </div>
-    <div
-      class="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4"
-    >
-      <div class="text-xs text-muted-foreground">
-        <p>
-          上次成功：{job?.lastSuccessAt
-            ? formatDateTime(job.lastSuccessAt)
-            : "尚無紀錄"}
-        </p>
-        <p class="mt-1">
-          排程：{scheduleLabel}
-        </p>
-      </div>
-      <Button
-        size="sm"
-        variant={selected ? "default" : "outline"}
-        aria-expanded={selected}
-        onclick={onConfigure}>{selected ? "收合" : "管理設定"}</Button
-      >
-    </div>
-    {#if selected && children}
-      <div class="mt-5 border-t border-border pt-5">
-        {@render children()}
-      </div>
-    {/if}</CardContent
-  ></Card
+<button
+  class={`c-data-row w-full border-b border-border px-4 py-3.5 text-left last:border-b-0 ${selected ? "bg-accent/60 shadow-[inset_3px_0_0_#287080]" : "bg-card"}`}
+  aria-current={selected ? "true" : undefined}
+  onclick={onConfigure}
 >
+  <div class="flex items-start justify-between gap-4">
+    <div class="flex min-w-0 items-start gap-3">
+      <span
+        class={`flex size-9 shrink-0 items-center justify-center rounded-lg ${selected ? "bg-steel text-white" : "bg-steel/10 text-steel"}`}
+      >
+        <SourceIcon class="size-5" />
+      </span>
+      <div class="min-w-0">
+        <h2 class="font-semibold">{title}</h2>
+        <p class="mt-0.5 truncate text-xs text-muted-foreground">
+          {description}
+        </p>
+      </div>
+    </div>
+    <Badge
+      class="shrink-0 whitespace-nowrap"
+      variant={needsAction
+        ? "destructive"
+        : $settings.data?.configured
+          ? "success"
+          : "secondary"}
+      >{needsAction
+        ? "需要處理"
+        : $settings.data?.configured
+          ? "已設定"
+          : "未設定"}</Badge
+    >
+  </div>
+  <div class="mt-2 flex items-center justify-between gap-3 pl-12">
+    <p class="truncate text-xs text-muted-foreground">
+      {job?.lastSuccessAt
+        ? `上次成功 ${formatDateTime(job.lastSuccessAt)}`
+        : "尚無同步紀錄"}
+      <span class="mx-1.5 text-border">|</span>{scheduleLabel}
+    </p>
+    <ChevronRight
+      class={`size-4 shrink-0 text-muted-foreground transition-transform ${selected ? "translate-x-0.5 text-steel" : ""}`}
+    />
+  </div>
+</button>

@@ -75,26 +75,30 @@
 
 <Card as="section" class="overflow-hidden">
   <div
-    class="flex flex-wrap items-start justify-between gap-4 border-b border-border bg-ink px-5 py-4 text-white"
+    class="flex flex-wrap items-start justify-between gap-4 border-b border-border bg-secondary/55 px-5 py-4"
   >
     <div class="flex items-start gap-3">
       <span
-        class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-white/10 text-white"
+        class="flex size-10 shrink-0 items-center justify-center rounded-lg bg-steel/10 text-steel"
       >
         <Clock3 class="size-5" />
       </span>
       <div>
         <h2 class="font-semibold">預設同步排程</h2>
-        <p class="mt-1 text-xs text-white/55">
+        <p class="mt-1 text-xs text-muted-foreground">
           選擇跟隨預設的連接器，會從設定時間起依序同步。
         </p>
       </div>
     </div>
     <div class="flex flex-wrap items-center gap-2 text-xs">
-      <span class="rounded-full bg-white/10 px-3 py-1.5 text-white/70">
+      <span
+        class="rounded-full border border-border bg-card px-3 py-1.5 text-muted-foreground"
+      >
         Asia/Taipei
       </span>
-      <span class="rounded-full bg-white/10 px-3 py-1.5 font-semibold">
+      <span
+        class="rounded-full bg-steel/10 px-3 py-1.5 font-semibold text-steel"
+      >
         {inheritedJobs} 個連接器跟隨
       </span>
     </div>

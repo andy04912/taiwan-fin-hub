@@ -10,6 +10,7 @@
     Eye,
     EyeOff,
     RefreshCw,
+    CircleCheck,
   } from "@lucide/svelte";
   import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
   import { parseViewHash, viewHash } from "./app/navigation";
@@ -200,28 +201,28 @@
 
 <QueryClientProvider client={queryClient}>
   <div
-    class="min-h-screen bg-paper text-ink xl:grid xl:grid-cols-[240px_minmax(0,1fr)]"
+    class="min-h-screen bg-paper text-ink xl:grid xl:grid-cols-[216px_minmax(0,1fr)]"
     use:swipeBack={{
       enabled: isStandalone() && (isDetail(view) || isMobileSetting(view)),
       onBack: navigateBack,
     }}
   >
     <aside
-      class="hidden border-r border-white/10 bg-ink px-6 py-7 text-white xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col"
+      class="hidden border-r border-white/8 bg-ink px-4 py-5 text-white xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col"
     >
-      <div class="px-2">
-        <h1 class="text-xl font-semibold tracking-normal">Taiwan Fin Hub</h1>
-        <p
-          class="mt-2 text-xs font-semibold uppercase tracking-[0.16em] text-steel/90"
-        >
-          Wealth OS
+      <div class="border-b border-white/8 px-3 pb-5 pt-1">
+        <h1 class="text-[17px] font-semibold tracking-[-0.02em]">
+          Taiwan Fin Hub
+        </h1>
+        <p class="mt-2 flex items-center gap-1.5 text-xs text-white/55">
+          <CircleCheck class="size-3.5 text-emerald-300" />資料服務正常
         </p>
       </div>
-      <nav class="mt-6 grid gap-1">
+      <nav class="mt-4 grid gap-1" aria-label="主要導覽">
         {#each navItems as item (item.view)}
           {@const NavIcon = item.icon}
           <button
-            class={`flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-medium transition ${primaryView === item.view ? "bg-white/10 text-white" : "text-white/65 hover:bg-white/5 hover:text-white"}`}
+            class={`relative flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-medium transition ${primaryView === item.view ? "bg-white/8 text-white before:absolute before:-left-4 before:h-5 before:w-0.5 before:rounded-r-full before:bg-cyan-300" : "text-white/60 hover:bg-white/5 hover:text-white"}`}
             aria-current={primaryView === item.view ? "page" : undefined}
             onclick={() => navigate(item.view)}
           >
@@ -229,6 +230,14 @@
           </button>
         {/each}
       </nav>
+      <div
+        class="mt-auto rounded-lg border border-white/8 bg-white/[0.035] px-3 py-3"
+      >
+        <p class="text-[11px] font-semibold text-white/45">隱私優先</p>
+        <p class="mt-1 text-xs leading-relaxed text-white/65">
+          金融資料保留於你的私人環境。
+        </p>
+      </div>
     </aside>
 
     <div
@@ -237,22 +246,22 @@
       class:pb-5={!!mobileSetting}
     >
       <div
-        class="no-scrollbar hidden border-b border-ink/10 bg-white px-4 py-2 md:flex md:gap-1 md:overflow-x-auto xl:hidden"
+        class="no-scrollbar hidden border-b border-border bg-white px-4 py-2 md:flex md:gap-1 md:overflow-x-auto xl:hidden"
       >
         {#each navItems as item (item.view)}
           {@const NavIcon = item.icon}
           <button
-            class={`flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium ${primaryView === item.view ? "bg-ink text-white" : "text-ink/60 hover:bg-ink/5"}`}
+            class={`flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-semibold transition ${primaryView === item.view ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-secondary"}`}
             onclick={() => navigate(item.view)}
             ><NavIcon class="size-4" />{item.label}</button
           >
         {/each}
       </div>
       <header
-        class="sticky top-0 z-20 border-b border-ink/10 bg-white/95 backdrop-blur-sm xl:static xl:bg-transparent xl:backdrop-blur-0"
+        class="sticky top-0 z-20 border-b border-border bg-white/92 backdrop-blur-md xl:static xl:border-b-0 xl:bg-transparent xl:backdrop-blur-0"
       >
         <div
-          class="mx-auto flex max-w-[1440px] flex-col gap-3 px-4 py-4 sm:px-6 xl:px-8 xl:py-6"
+          class="mx-auto flex max-w-[1440px] flex-col gap-3 px-4 py-3.5 sm:px-6 xl:px-8 xl:pb-3 xl:pt-7"
         >
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0">
@@ -264,7 +273,7 @@
                     onclick={() => navigate("more")}>←</button
                   >
                   <h1
-                    class="truncate text-2xl font-semibold tracking-tight xl:text-3xl"
+                    class="truncate text-xl font-semibold tracking-tight xl:text-[28px]"
                   >
                     {mobileSetting.label}
                   </h1>
@@ -275,7 +284,7 @@
                     onclick={() => navigate("assets")}>← 返回資產</button
                   >{/if}
                 <h1
-                  class="truncate text-2xl font-semibold tracking-tight xl:text-3xl"
+                  class="truncate text-xl font-semibold tracking-tight xl:text-[28px]"
                 >
                   <span class="md:hidden"
                     >{view === "more"
@@ -290,15 +299,23 @@
                   >
                 </h1>
               {/if}
-              <p class="mt-1 hidden text-sm text-ink/55 md:block">
+              <p class="mt-1 hidden text-sm text-muted-foreground md:block">
                 {detail?.description ??
                   mobileSetting?.description ??
                   currentView.description}
               </p>
             </div>
             <div class="flex shrink-0 items-center gap-2">
+              <span
+                class="mr-1 hidden text-right text-xs text-muted-foreground lg:block"
+              >
+                <span class="block font-semibold text-ink/65">資料已載入</span>
+                <span class="block">最近狀態依各來源為準</span>
+              </span>
               <Button
-                class={mobileSetting ? "hidden" : "rounded-full"}
+                class={mobileSetting
+                  ? "hidden"
+                  : "rounded-full border border-border bg-white"}
                 aria-label={moneyState.hidden ? "顯示金額" : "隱藏金額"}
                 onclick={toggleMoneyVisibility}
                 size="icon"
@@ -320,7 +337,7 @@
       </header>
 
       <main
-        class="mx-auto max-w-[1440px] px-4 pb-5 pt-0 sm:px-6 md:py-5 xl:px-8 xl:py-6"
+        class="mx-auto max-w-[1440px] px-4 pb-6 pt-1 sm:px-6 md:py-5 xl:px-8 xl:pb-8 xl:pt-3"
       >
         {#if view === "overview"}<Overview {api} {navigate} />
         {:else if view === "assets"}<Assets {api} {navigate} />
@@ -342,10 +359,10 @@
           />{/if}
       </main>
       <footer
-        class="mx-auto hidden max-w-[1440px] border-t border-ink/8 px-4 py-6 sm:px-6 md:block xl:px-8"
+        class="mx-auto hidden max-w-[1440px] border-t border-border px-4 py-6 sm:px-6 md:block xl:px-8"
       >
         <p class="text-xs leading-relaxed text-ink/35">
-          <strong class="font-medium text-ink/50">免責聲明：</strong
+          <strong class="font-medium text-ink/60">免責聲明：</strong
           >本程式僅供個人研究與自用，未與臺灣集中保管結算所、財政部、金融監督管理委員會、各銀行或任何金融機構合作，亦未獲前述機構授權或背書。本程式所呈現的資料以您自行提供之憑證取得，作者不保證資料的即時性、正確性與完整性，亦不對因使用本程式所產生的任何直接或間接損失負責。請勿將本程式用於任何商業用途。
         </p>
       </footer>
@@ -354,20 +371,20 @@
     {#if !mobileSetting}
       <nav
         aria-label="主要導覽"
-        class="fixed inset-x-0 bottom-0 z-50 grid grid-cols-4 gap-1 border-t border-ink/10 bg-ink px-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 text-white shadow-[0_-8px_28px_rgba(31,41,51,0.12)] md:hidden"
+        class="fixed inset-x-0 bottom-0 z-50 grid grid-cols-4 gap-1 border-t border-border bg-white/96 px-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 text-ink shadow-[0_-8px_28px_rgba(24,38,45,0.08)] backdrop-blur-md md:hidden"
       >
         {#each mobilePrimaryViews as mobileView (mobileView)}
           {@const item = navItems.find(
             (candidate) => candidate.view === mobileView,
           )!}{@const NavIcon = item.icon}
           <button
-            class={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[11px] font-medium transition ${primaryView === item.view ? "bg-white/10 text-white" : "text-white/65"}`}
+            class={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[11px] font-semibold transition ${primaryView === item.view ? "bg-accent text-steel" : "text-muted-foreground"}`}
             onclick={() => navigate(item.view)}
             ><NavIcon class="size-5" />{item.shortLabel}</button
           >
         {/each}
         <button
-          class={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[11px] font-medium transition ${view === "more" || !mobilePrimaryViews.includes(primaryView) ? "bg-white/10 text-white" : "text-white/65"}`}
+          class={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[11px] font-semibold transition ${view === "more" || !mobilePrimaryViews.includes(primaryView) ? "bg-accent text-steel" : "text-muted-foreground"}`}
           onclick={() => navigate("more")}
           ><Ellipsis class="size-5" />更多</button
         >

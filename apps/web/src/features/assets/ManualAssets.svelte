@@ -14,6 +14,8 @@
   import Input from "../../components/ui/Input.svelte";
   import Select from "../../components/ui/Select.svelte";
   import Textarea from "../../components/ui/Textarea.svelte";
+  import PageSkeleton from "../../components/ui/PageSkeleton.svelte";
+  import Surface from "../../components/ui/Surface.svelte";
   import type { ApiClient } from "../../lib/api";
   import { queryKeys } from "../../lib/api";
   import {
@@ -168,23 +170,31 @@
 </script>
 
 {#if $assets.isPending}
-  <EmptyState title="載入其他資產中" body="正在讀取估值紀錄。" />
+  <PageSkeleton />
+{:else if $assets.isError}
+  <EmptyState title="無法載入其他資產" body="請稍後再試。" />
 {:else}
-  <div class="grid gap-5">
-    <div class="flex items-end justify-between">
+  <div class="c-page-grid">
+    <Surface
+      tone="strong"
+      class="flex items-end justify-between gap-4 p-5 md:p-6"
+    >
       <div>
-        <p class="text-sm text-ink/50">其他資產總額</p>
-        <p class="mt-1 text-3xl font-bold">{formatCurrency(total)}</p>
+        <p class="text-xs font-semibold text-white/60">其他資產總額</p>
+        <p class="mt-2 text-3xl font-bold tracking-tight tabular-nums">
+          {formatCurrency(total)}
+        </p>
+        <p class="mt-1 text-xs text-white/55">房產、保險、交通工具與其他估值</p>
       </div>
       <Button
-        variant="primary"
+        variant="secondary"
         onclick={() => {
           adding = true;
           editing = null;
           reset();
         }}><Plus class="size-4" />新增資產</Button
       >
-    </div>
+    </Surface>
     <Card>
       <CardHeader><h2 class="text-lg font-semibold">資產清單</h2></CardHeader>
       <CardContent class="p-0">

@@ -6,6 +6,9 @@
   import CardContent from "../../components/ui/CardContent.svelte";
   import EmptyState from "../../components/ui/EmptyState.svelte";
   import Input from "../../components/ui/Input.svelte";
+  import Metric from "../../components/ui/Metric.svelte";
+  import PageSkeleton from "../../components/ui/PageSkeleton.svelte";
+  import SummaryStrip from "../../components/ui/SummaryStrip.svelte";
   import type { ApiClient } from "../../lib/api";
   import { bankQuery, creditCardBillsQuery } from "../../lib/queries";
   import type { CreditCardBillRow } from "../../lib/types";
@@ -38,28 +41,35 @@
   }
 </script>
 
-{#if $bank.isPending}<EmptyState
-    title="載入信用卡中"
-    body="正在讀取信用卡資料。"
-  />{:else}<div class="grid min-w-0 gap-5">
-    <div class="grid grid-cols-2 gap-3 md:grid-cols-3">
-      <div class="rounded-xl border border-ink/10 bg-white p-4 shadow-xs">
-        <p class="text-xs text-ink/45">信用卡數</p>
-        <p class="mt-2 text-xl font-bold">{cards.length}</p>
-      </div>
-      <div class="rounded-xl border border-ink/10 bg-white p-4 shadow-xs">
-        <p class="text-xs text-ink/45">目前已用金額</p>
-        <p class="mt-2 text-xl font-bold text-coral">
-          {formatCurrency(outstanding)}
-        </p>
-      </div>
-      <div
-        class="hidden rounded-xl border border-ink/10 bg-white p-4 shadow-xs md:block"
-      >
-        <p class="text-xs text-ink/45">帳單筆數</p>
-        <p class="mt-2 text-xl font-bold">{filteredBills.length}</p>
-      </div>
-    </div>
+{#if $bank.isPending || $bills.isPending}
+  <PageSkeleton />
+{:else if $bank.isError || $bills.isError}
+  <EmptyState
+    title="無法載入信用卡"
+    body="請稍後再試，或確認信用卡來源的同步狀態。"
+  />
+{:else}<div class="c-page-grid min-w-0">
+    <SummaryStrip class="md:grid-cols-3 md:[&>*]:pl-5">
+      <Metric
+        label="目前已用金額"
+        value={formatCurrency(outstanding)}
+        detail={`${cards.length} 張信用卡`}
+        tone="negative"
+      />
+      <Metric
+        label="帳單筆數"
+        value={String(filteredBills.length)}
+        detail="符合目前搜尋"
+      />
+      <Metric
+        label="待繳帳單"
+        value={String(filteredBills.filter((bill) => !bill.isPaid).length)}
+        detail="請留意繳款期限"
+        tone={filteredBills.some((bill) => !bill.isPaid)
+          ? "warning"
+          : "positive"}
+      />
+    </SummaryStrip>
     <Card
       ><CardHeader><h2 class="text-lg font-semibold">信用卡帳戶</h2></CardHeader
       ><CardContent class="grid gap-3 md:grid-cols-2"

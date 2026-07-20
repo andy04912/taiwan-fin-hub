@@ -151,7 +151,7 @@
             {@const active = includedAssets.includes(option.key)}
             {@const available = availableAssets.has(option.key)}
             <button
-              class={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition ${active && available ? "border-ink/15 bg-white text-ink shadow-xs" : "border-ink/8 bg-paper text-ink/45"} ${available ? "hover:border-steel/25 hover:text-steel" : "cursor-not-allowed opacity-40"}`}
+              class={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition ${active && available ? "border-steel/30 bg-accent text-accent-foreground" : "border-border bg-secondary/45 text-muted-foreground"} ${available ? "hover:border-steel/35 hover:text-steel" : "cursor-not-allowed opacity-40"}`}
               disabled={!available}
               aria-pressed={active}
               onclick={() => toggleAsset(option.key)}
