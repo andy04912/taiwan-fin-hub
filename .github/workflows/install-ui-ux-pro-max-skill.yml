@@ -1,0 +1,43 @@
+name: Install UI UX Pro Max Skill
+
+on:
+  push:
+    branches:
+      - agent/install-ui-ux-pro-max-skill
+    paths:
+      - .github/workflows/install-ui-ux-pro-max-skill.yml
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout installation branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/install-ui-ux-pro-max-skill
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install official CLI
+        run: npm install --global ui-ux-pro-max-cli@2.11.0
+
+      - name: Generate Codex skill files
+        run: uipro init --ai codex --force
+
+      - name: Remove temporary installer workflow
+        run: rm .github/workflows/install-ui-ux-pro-max-skill.yml
+
+      - name: Commit generated skill
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .codex .github/workflows/install-ui-ux-pro-max-skill.yml
+          git commit -m "安裝 UI UX Pro Max Codex Skill"
+          git push origin HEAD:agent/install-ui-ux-pro-max-skill
