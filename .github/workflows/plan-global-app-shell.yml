@@ -1,0 +1,60 @@
+name: Generate global App Shell design plan
+
+on:
+  push:
+    branches:
+      - agent/redesign-global-app-shell
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/redesign-global-app-shell
+          fetch-depth: 0
+
+      - name: Generate design plan with UI UX Pro Max
+        run: |
+          mkdir -p docs
+          cat > docs/005-global-app-shell-redesign-plan.md <<'EOF'
+          # Taiwan Fin Hub — Global App Shell Redesign Plan
+
+          ## Design Read
+
+          Reading this as: a trust-first personal finance product for daily desktop and mobile use, with a calm financial-console language, leaning toward a full-screen application shell, dense but readable information hierarchy, one restrained cyan/steel accent, and purposeful motion rather than decorative effects.
+
+          ## Taste Dials
+
+          - `DESIGN_VARIANCE: 6` — enough asymmetry and hierarchy to avoid template-like dashboards while preserving financial trust.
+          - `MOTION_INTENSITY: 8` — visible page, navigation, list and state transitions, capped for responsiveness and reduced-motion support.
+          - `VISUAL_DENSITY: 7` — desktop console density with touch-safe mobile layouts.
+
+          ## Product Architecture
+
+          - Desktop: fixed primary sidebar + fixed top command bar + one internal scroll viewport.
+          - Tablet: compact top navigation with optional slide-over menu.
+          - Mobile/PWA: sticky top bar + hamburger drawer + four-item bottom navigation.
+          - Detail pages: predictable back navigation inside the shell, never a separate document-style page.
+          - Settings: preserve the existing secondary settings shell inside the global shell.
+          - Motion: page enter/exit, active-nav indicator, drawer transitions, staggered content reveal, tactile press states, loading shimmer, number/status emphasis.
+          - Accessibility: keyboard navigation, visible focus, 44px touch targets, no color-only states, `prefers-reduced-motion` fallback.
+
+          ## UI UX Pro Max Recommendation
+
+          EOF
+          python3 .codex/skills/ui-ux-pro-max/scripts/search.py "personal finance dashboard trustworthy full-screen app shell data-dense motion" --design-system -p "Taiwan Fin Hub" -f markdown --variance 6 --motion 8 --density 7 >> docs/005-global-app-shell-redesign-plan.md
+          printf '\n\n## Svelte App Shell Guidance\n\n' >> docs/005-global-app-shell-redesign-plan.md
+          python3 .codex/skills/ui-ux-pro-max/scripts/search.py "responsive app shell sidebar drawer sticky navigation transitions accessibility" --stack svelte >> docs/005-global-app-shell-redesign-plan.md
+
+      - name: Commit plan and remove temporary workflow
+        run: |
+          rm .github/workflows/plan-global-app-shell.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/005-global-app-shell-redesign-plan.md .github/workflows/plan-global-app-shell.yml
+          git commit -m "規劃全站 App Shell 與動態設計系統"
+          git push origin HEAD:agent/redesign-global-app-shell
