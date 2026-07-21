@@ -1,0 +1,43 @@
+name: Validate UI UX Pro Max Skill
+
+on:
+  push:
+    branches:
+      - agent/install-ui-ux-pro-max-skill
+    paths:
+      - .github/workflows/validate-ui-ux-pro-max-skill.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout installation branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/install-ui-ux-pro-max-skill
+          fetch-depth: 0
+
+      - name: Validate design system search
+        run: |
+          python3 .codex/skills/ui-ux-pro-max/scripts/search.py "personal finance dashboard trustworthy dense" --design-system -p "Taiwan Fin Hub" -f markdown > /tmp/design-system.md
+          test -s /tmp/design-system.md
+          grep -q "Taiwan Fin Hub" /tmp/design-system.md
+
+      - name: Validate Svelte guidance search
+        run: |
+          python3 .codex/skills/ui-ux-pro-max/scripts/search.py "responsive app shell navigation" --stack svelte > /tmp/svelte-guidelines.txt
+          test -s /tmp/svelte-guidelines.txt
+
+      - name: Remove temporary validation workflow
+        run: rm .github/workflows/validate-ui-ux-pro-max-skill.yml
+
+      - name: Commit validation cleanup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/validate-ui-ux-pro-max-skill.yml
+          git commit -m "驗證 UI UX Pro Max Skill"
+          git push origin HEAD:agent/install-ui-ux-pro-max-skill
