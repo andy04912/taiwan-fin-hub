@@ -32,13 +32,13 @@
   <p class="text-xs font-semibold text-muted-foreground">{label}</p>
   <p
     class={cn(
-      "mt-1.5 truncate text-xl font-bold tracking-tight tabular-nums md:text-2xl",
+      "c-metric-value mt-1.5 truncate text-xl font-bold tracking-tight tabular-nums md:text-2xl",
       toneClass,
     )}
   >
     {value}
   </p>
-  {#if detail}<p class="mt-1 truncate text-xs text-muted-foreground">
-      {detail}
-    </p>{/if}
+  {#if detail}
+    <p class="mt-1 truncate text-xs text-muted-foreground">{detail}</p>
+  {/if}
 </div>
