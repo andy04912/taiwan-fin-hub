@@ -16,7 +16,7 @@
 
   const classes = $derived(
     cn(
-      "rounded-xl border",
+      "c-surface-motion rounded-xl border",
       tone === "strong"
         ? "border-ink bg-ink text-white"
         : tone === "subtle"

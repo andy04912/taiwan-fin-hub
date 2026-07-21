@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, type Component } from "svelte";
+  import { fade, fly } from "svelte/transition";
   import {
     BarChart3,
     Wallet,
@@ -11,6 +12,10 @@
     EyeOff,
     RefreshCw,
     CircleCheck,
+    Menu,
+    X,
+    LockKeyhole,
+    ChevronRight,
   } from "@lucide/svelte";
   import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
   import { parseViewHash, viewHash } from "./app/navigation";
@@ -43,6 +48,7 @@
   });
   let view = $state<View>("overview");
   let runtime = $state<RuntimeInfo>({ demoMode: false });
+  let mobileNavOpen = $state(false);
 
   const navItems: {
     view: PrimaryView;
@@ -117,9 +123,10 @@
       description: "讓銀行交易依條件自動分類。",
     },
   };
-  const isDetail = (v: View): v is DetailView => Object.hasOwn(detailLabels, v);
-  const isMobileSetting = (v: View): v is MobileSettingsView =>
-    Object.hasOwn(mobileSettingsLabels, v);
+  const isDetail = (value: View): value is DetailView =>
+    Object.hasOwn(detailLabels, value);
+  const isMobileSetting = (value: View): value is MobileSettingsView =>
+    Object.hasOwn(mobileSettingsLabels, value);
   const primaryView = $derived(
     view === "more" || isMobileSetting(view)
       ? "settings"
@@ -134,16 +141,29 @@
   const mobileSetting = $derived(
     isMobileSetting(view) ? mobileSettingsLabels[view] : undefined,
   );
+  const pageTitle = $derived(
+    detail?.label ??
+      mobileSetting?.label ??
+      (view === "more" ? "更多" : currentView.label),
+  );
+  const pageDescription = $derived(
+    detail?.description ??
+      mobileSetting?.description ??
+      currentView.description,
+  );
 
   const isStandalone = () =>
     document.documentElement.classList.contains("is-standalone");
+
   function scrollToTop() {
     const options: ScrollToOptions = { top: 0, behavior: "smooth" };
     requestAnimationFrame(() => {
-      const internalScrollArea = document.getElementById("app-scroll-area");
-      if (internalScrollArea) {
-        internalScrollArea.scrollTo(options);
-        return;
+      for (const id of ["app-scroll-area", "global-scroll-area"]) {
+        const scrollArea = document.getElementById(id);
+        if (scrollArea) {
+          scrollArea.scrollTo(options);
+          return;
+        }
       }
       if (isStandalone()) document.getElementById("root")?.scrollTo(options);
       else window.scrollTo(options);
@@ -164,6 +184,7 @@
       const next = parseViewHash(window.location.hash);
       if (next) {
         view = next;
+        mobileNavOpen = false;
         scrollToTop();
       }
     };
@@ -175,10 +196,13 @@
       .catch(() => (runtime = { demoMode: false }));
     moneyState.hidden =
       localStorage.getItem("taiwan-fin-hub-money-hidden") === "true";
+
     return () => window.removeEventListener("hashchange", handleHashChange);
   });
+
   function navigate(next: View) {
     view = next;
+    mobileNavOpen = false;
     const nextHash = viewHash(next);
     if (window.location.hash !== nextHash) {
       if (isStandalone()) {
@@ -193,10 +217,12 @@
     }
     scrollToTop();
   }
+
   function navigateBack() {
     if (isDetail(view)) navigate("assets");
     else if (isMobileSetting(view)) navigate("more");
   }
+
   function toggleMoneyVisibility() {
     moneyState.hidden = !moneyState.hidden;
     localStorage.setItem(
@@ -204,202 +230,310 @@
       String(moneyState.hidden),
     );
   }
+
+  function handleKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") mobileNavOpen = false;
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <QueryClientProvider client={queryClient}>
   <div
-    class={`bg-paper text-ink xl:grid xl:grid-cols-[216px_minmax(0,1fr)] ${primaryView === "settings" ? "h-[100dvh] overflow-hidden" : "min-h-screen"}`}
+    class="c-app-shell"
     use:swipeBack={{
       enabled: isStandalone() && (isDetail(view) || isMobileSetting(view)),
       onBack: navigateBack,
     }}
   >
-    <aside
-      class="hidden border-r border-white/8 bg-ink px-4 py-5 text-white xl:sticky xl:top-0 xl:flex xl:h-[100dvh] xl:flex-col"
-    >
-      <div class="border-b border-white/8 px-3 pb-5 pt-1">
-        <h1 class="text-[17px] font-semibold tracking-[-0.02em]">
-          Taiwan Fin Hub
-        </h1>
-        <p class="mt-2 flex items-center gap-1.5 text-xs text-white/55">
-          <CircleCheck class="size-3.5 text-emerald-300" />資料服務正常
-        </p>
-      </div>
-      <nav class="mt-4 grid gap-1" aria-label="主要導覽">
-        {#each navItems as item (item.view)}
-          {@const NavIcon = item.icon}
-          <button
-            class={`relative flex min-h-11 items-center gap-3 rounded-lg px-3 text-left text-sm font-medium transition ${primaryView === item.view ? "bg-white/8 text-white before:absolute before:-left-4 before:h-5 before:w-0.5 before:rounded-r-full before:bg-cyan-300" : "text-white/60 hover:bg-white/5 hover:text-white"}`}
-            aria-current={primaryView === item.view ? "page" : undefined}
-            onclick={() => navigate(item.view)}
-          >
-            <NavIcon class="size-[22px] shrink-0 stroke-[1.8]" />{item.label}
-          </button>
-        {/each}
-      </nav>
-      <div
-        class="mt-auto rounded-lg border border-white/8 bg-white/[0.035] px-3 py-3"
-      >
-        <p class="text-[11px] font-semibold text-white/45">隱私優先</p>
-        <p class="mt-1 text-xs leading-relaxed text-white/65">
-          金融資料保留於你的私人環境。
-        </p>
+    <aside class="c-desktop-sidebar">
+      <div class="c-sidebar-glow" aria-hidden="true"></div>
+      <div class="relative z-10 flex h-full min-h-0 flex-col">
+        <div class="border-b border-white/8 px-3 pb-5 pt-1">
+          <div class="flex items-center gap-3">
+            <span class="c-brand-mark"><BarChart3 class="size-5" /></span>
+            <div>
+              <h1 class="text-[17px] font-semibold tracking-[-0.025em]">
+                Taiwan Fin Hub
+              </h1>
+              <p class="mt-1 text-[11px] font-medium text-white/45">
+                Personal finance console
+              </p>
+            </div>
+          </div>
+          <p class="mt-4 flex items-center gap-2 text-xs text-white/60">
+            <span class="c-live-dot" aria-hidden="true"></span>
+            資料服務正常
+          </p>
+        </div>
+
+        <nav class="mt-4 grid gap-1.5" aria-label="主要導覽">
+          {#each navItems as item (item.view)}
+            {@const NavIcon = item.icon}
+            <button
+              class={`c-primary-nav-item ${primaryView === item.view ? "is-active" : ""}`}
+              aria-current={primaryView === item.view ? "page" : undefined}
+              onclick={() => navigate(item.view)}
+            >
+              <span class="c-primary-nav-icon">
+                <NavIcon class="size-[21px] stroke-[1.8]" />
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate">{item.label}</span>
+                <span class="mt-0.5 block truncate text-[11px] font-normal text-white/38">
+                  {item.description}
+                </span>
+              </span>
+              <ChevronRight
+                class={`size-4 shrink-0 transition ${primaryView === item.view ? "translate-x-0 opacity-100" : "-translate-x-1 opacity-0"}`}
+              />
+            </button>
+          {/each}
+        </nav>
+
+        <div class="mt-auto grid gap-3">
+          <div class="c-sidebar-context">
+            <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/38">
+              Current workspace
+            </p>
+            <p class="mt-2 text-sm font-semibold text-white">{pageTitle}</p>
+            <p class="mt-1 text-xs leading-relaxed text-white/52">
+              {pageDescription}
+            </p>
+          </div>
+          <div class="flex items-start gap-2.5 px-2 text-xs leading-relaxed text-white/48">
+            <LockKeyhole class="mt-0.5 size-4 shrink-0 text-cyan-200/70" />
+            <span>金融資料保留於你的私人環境。</span>
+          </div>
+        </div>
       </div>
     </aside>
 
-    <div
-      class={`min-w-0 ${primaryView === "settings" ? "flex h-[100dvh] min-h-0 flex-col overflow-hidden" : mobileSetting ? "pb-5" : "pb-20"}`}
-    >
-      <div
-        class="no-scrollbar hidden shrink-0 border-b border-border bg-white px-4 py-2 md:flex md:gap-1 md:overflow-x-auto xl:hidden"
-      >
-        {#each navItems as item (item.view)}
-          {@const NavIcon = item.icon}
+    <div class="c-app-frame">
+      <header class="c-app-header">
+        <div class="flex min-w-0 flex-1 items-center gap-3">
           <button
-            class={`flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-semibold transition ${primaryView === item.view ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-secondary"}`}
-            onclick={() => navigate(item.view)}
-            ><NavIcon class="size-4" />{item.label}</button
+            type="button"
+            class="c-header-menu-button"
+            aria-label="開啟主要選單"
+            aria-expanded={mobileNavOpen}
+            onclick={() => (mobileNavOpen = true)}
           >
-        {/each}
-      </div>
-      <header
-        class="sticky top-0 z-20 shrink-0 border-b border-border bg-white/92 backdrop-blur-md xl:static xl:border-b-0 xl:bg-transparent xl:backdrop-blur-0"
-      >
-        <div
-          class={primaryView === "settings"
-            ? "flex w-full flex-col gap-3 px-4 py-3.5 sm:px-6 xl:px-8 xl:pb-3 xl:pt-7"
-            : "mx-auto flex max-w-[1440px] flex-col gap-3 px-4 py-3.5 sm:px-6 xl:px-8 xl:pb-3 xl:pt-7"}
-        >
-          <div class="flex items-center justify-between gap-3">
-            <div class="min-w-0">
-              {#if mobileSetting}
-                <div class="flex items-center gap-2 md:block">
-                  <button
-                    aria-label="返回更多"
-                    class="flex size-10 shrink-0 items-center justify-center rounded-full text-xl text-ink hover:bg-ink/5 md:hidden"
-                    onclick={() => navigate("more")}>←</button
-                  >
-                  <h1
-                    class="truncate text-xl font-semibold tracking-tight xl:text-[28px]"
-                  >
-                    {mobileSetting.label}
-                  </h1>
-                </div>
-              {:else}
-                {#if detail}<button
-                    class="mb-1 inline-flex items-center gap-1 text-xs font-medium text-steel"
-                    onclick={() => navigate("assets")}>← 返回資產</button
-                  >{/if}
-                <h1
-                  class="truncate text-xl font-semibold tracking-tight xl:text-[28px]"
-                >
-                  <span class="md:hidden"
-                    >{view === "more"
-                      ? "更多"
-                      : primaryView === "overview"
-                        ? "資產總覽"
-                        : primaryView === "activity"
-                          ? "所有活動"
-                          : currentView.label}</span
-                  ><span class="hidden md:inline"
-                    >{detail?.label ?? currentView.label}</span
-                  >
-                </h1>
+            <Menu class="size-5" />
+          </button>
+
+          <div class="min-w-0">
+            {#if detail}
+              <button
+                class="mb-1 inline-flex items-center gap-1 text-xs font-semibold text-steel transition hover:-translate-x-0.5"
+                onclick={() => navigate("assets")}
+              >
+                ← 返回資產
+              </button>
+            {:else if mobileSetting}
+              <button
+                class="mb-1 inline-flex items-center gap-1 text-xs font-semibold text-steel transition hover:-translate-x-0.5 md:hidden"
+                onclick={() => navigate("more")}
+              >
+                ← 返回更多
+              </button>
+            {/if}
+            <div class="flex items-center gap-3">
+              <h1 class="truncate text-xl font-semibold tracking-[-0.025em] md:text-2xl xl:text-[28px]">
+                {pageTitle}
+              </h1>
+              {#if runtime.demoMode}
+                <span class="hidden rounded-full border border-steel/20 bg-steel/8 px-2.5 py-1 text-[11px] font-semibold text-steel sm:inline-flex">
+                  Demo
+                </span>
               {/if}
-              <p class="mt-1 hidden text-sm text-muted-foreground md:block">
-                {detail?.description ??
-                  mobileSetting?.description ??
-                  currentView.description}
-              </p>
             </div>
-            <div class="flex shrink-0 items-center gap-2">
-              <span
-                class="mr-1 hidden text-right text-xs text-muted-foreground lg:block"
-              >
-                <span class="block font-semibold text-ink/65">資料已載入</span>
-                <span class="block">最近狀態依各來源為準</span>
-              </span>
-              <Button
-                class={mobileSetting
-                  ? "hidden"
-                  : "rounded-full border border-border bg-white"}
-                aria-label={moneyState.hidden ? "顯示金額" : "隱藏金額"}
-                onclick={toggleMoneyVisibility}
-                size="icon"
-                variant="secondary"
-                ><Icon
-                  icon={moneyState.hidden ? Eye : EyeOff}
-                  size="lg"
-                /></Button
-              >
-              {#if primaryView === "settings"}<Button
-                  class="hidden md:inline-flex"
-                  onclick={() => queryClient.invalidateQueries()}
-                  variant="secondary"
-                  ><Icon icon={RefreshCw} size="sm" />重新整理</Button
-                >{/if}
-            </div>
+            <p class="mt-1 hidden truncate text-sm text-muted-foreground md:block">
+              {pageDescription}
+            </p>
           </div>
+        </div>
+
+        <div class="flex shrink-0 items-center gap-2">
+          <div class="c-header-status hidden lg:flex">
+            <span class="c-live-dot" aria-hidden="true"></span>
+            <span>
+              <span class="block text-xs font-semibold text-ink/70">資料已載入</span>
+              <span class="block text-[11px] text-muted-foreground">依來源顯示最新狀態</span>
+            </span>
+          </div>
+          <Button
+            class={mobileSetting
+              ? "hidden"
+              : "rounded-full border border-border bg-white shadow-sm"}
+            aria-label={moneyState.hidden ? "顯示金額" : "隱藏金額"}
+            onclick={toggleMoneyVisibility}
+            size="icon"
+            variant="secondary"
+          >
+            <Icon icon={moneyState.hidden ? Eye : EyeOff} size="lg" />
+          </Button>
+          {#if primaryView === "settings"}
+            <Button
+              class="hidden md:inline-flex"
+              onclick={() => queryClient.invalidateQueries()}
+              variant="secondary"
+            >
+              <Icon icon={RefreshCw} size="sm" />重新整理
+            </Button>
+          {/if}
         </div>
       </header>
 
-      <main
-        class={primaryView === "settings"
-          ? "min-h-0 flex-1 overflow-hidden"
-          : "mx-auto max-w-[1440px] px-4 pb-6 pt-1 sm:px-6 md:py-5 xl:px-8 xl:pb-8 xl:pt-3"}
-      >
-        {#if view === "overview"}<Overview {api} {navigate} />
-        {:else if view === "assets"}<Assets {api} {navigate} />
-        {:else if view === "activity"}<Activity {api} {navigate} />
-        {:else if view === "invoices"}<Invoices {api} />
-        {:else if view === "investments"}<Investments {api} />
-        {:else if view === "cards"}<Cards {api} />
-        {:else if view === "bank"}<Bank {api} {navigate} />
-        {:else if view === "manual-assets"}<ManualAssets {api} />
-        {:else}<SettingsView
-            {api}
-            demoMode={runtime.demoMode}
-            mobileView={view === "more"
-              ? "more"
-              : isMobileSetting(view)
-                ? view
-                : undefined}
-            {navigate}
-          />{/if}
+      <main class="min-h-0 flex-1 overflow-hidden">
+        {#if primaryView === "settings"}
+          {#key view}
+            <div class="h-full min-h-0" in:fade={{ duration: 180 }}>
+              <SettingsView
+                {api}
+                demoMode={runtime.demoMode}
+                mobileView={view === "more"
+                  ? "more"
+                  : isMobileSetting(view)
+                    ? view
+                    : undefined}
+                {navigate}
+              />
+            </div>
+          {/key}
+        {:else}
+          <div id="global-scroll-area" class="c-global-scroll-area">
+            <div class="c-global-content">
+              {#key view}
+                <div
+                  class="c-view-stage"
+                  in:fly={{ y: 14, duration: 280 }}
+                  out:fade={{ duration: 110 }}
+                >
+                  {#if view === "overview"}
+                    <Overview {api} {navigate} />
+                  {:else if view === "assets"}
+                    <Assets {api} {navigate} />
+                  {:else if view === "activity"}
+                    <Activity {api} {navigate} />
+                  {:else if view === "invoices"}
+                    <Invoices {api} />
+                  {:else if view === "investments"}
+                    <Investments {api} />
+                  {:else if view === "cards"}
+                    <Cards {api} />
+                  {:else if view === "bank"}
+                    <Bank {api} {navigate} />
+                  {:else if view === "manual-assets"}
+                    <ManualAssets {api} />
+                  {/if}
+                </div>
+              {/key}
+
+              <footer class="c-app-footer">
+                <p class="text-xs leading-relaxed text-ink/35">
+                  <strong class="font-medium text-ink/60">免責聲明：</strong
+                  >本程式僅供個人研究與自用，未與臺灣集中保管結算所、財政部、金融監督管理委員會、各銀行或任何金融機構合作，亦未獲前述機構授權或背書。本程式所呈現的資料以您自行提供之憑證取得，作者不保證資料的即時性、正確性與完整性，亦不對因使用本程式所產生的任何直接或間接損失負責。請勿將本程式用於任何商業用途。
+                </p>
+              </footer>
+            </div>
+          </div>
+        {/if}
       </main>
-      {#if primaryView !== "settings"}
-        <footer
-          class="mx-auto hidden max-w-[1440px] border-t border-border px-4 py-6 sm:px-6 md:block xl:px-8"
-        >
-          <p class="text-xs leading-relaxed text-ink/35">
-            <strong class="font-medium text-ink/60">免責聲明：</strong
-            >本程式僅供個人研究與自用，未與臺灣集中保管結算所、財政部、金融監督管理委員會、各銀行或任何金融機構合作，亦未獲前述機構授權或背書。本程式所呈現的資料以您自行提供之憑證取得，作者不保證資料的即時性、正確性與完整性，亦不對因使用本程式所產生的任何直接或間接損失負責。請勿將本程式用於任何商業用途。
-          </p>
-        </footer>
+
+      {#if !mobileSetting}
+        <nav aria-label="主要導覽" class="c-mobile-bottom-nav">
+          {#each mobilePrimaryViews as mobileView (mobileView)}
+            {@const item = navItems.find(
+              (candidate) => candidate.view === mobileView,
+            )!}
+            {@const NavIcon = item.icon}
+            <button
+              class={`c-mobile-bottom-item ${primaryView === item.view ? "is-active" : ""}`}
+              onclick={() => navigate(item.view)}
+            >
+              <span class="c-mobile-bottom-icon">
+                <NavIcon class="size-5" />
+              </span>
+              <span>{item.shortLabel}</span>
+            </button>
+          {/each}
+          <button
+            class={`c-mobile-bottom-item ${view === "more" || !mobilePrimaryViews.includes(primaryView) ? "is-active" : ""}`}
+            onclick={() => navigate("more")}
+          >
+            <span class="c-mobile-bottom-icon"><Ellipsis class="size-5" /></span>
+            <span>更多</span>
+          </button>
+        </nav>
       {/if}
     </div>
 
-    {#if !mobileSetting}
-      <nav
-        aria-label="主要導覽"
-        class="fixed inset-x-0 bottom-0 z-50 grid grid-cols-4 gap-1 border-t border-border bg-white/96 px-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 text-ink shadow-[0_-8px_28px_rgba(24,38,45,0.08)] backdrop-blur-md md:hidden"
+    {#if mobileNavOpen}
+      <button
+        type="button"
+        class="fixed inset-0 z-[90] bg-ink/45 backdrop-blur-[3px] xl:hidden"
+        aria-label="關閉主要選單"
+        onclick={() => (mobileNavOpen = false)}
+        transition:fade={{ duration: 170 }}
+      ></button>
+      <aside
+        class="c-mobile-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="主要選單"
+        transition:fly={{ x: -28, duration: 240 }}
       >
-        {#each mobilePrimaryViews as mobileView (mobileView)}
-          {@const item = navItems.find(
-            (candidate) => candidate.view === mobileView,
-          )!}{@const NavIcon = item.icon}
+        <div class="flex items-center justify-between border-b border-border px-5 pb-4 pt-[max(env(safe-area-inset-top),1.25rem)]">
+          <div class="flex items-center gap-3">
+            <span class="c-brand-mark c-brand-mark--light">
+              <BarChart3 class="size-5" />
+            </span>
+            <div>
+              <p class="font-semibold tracking-tight">Taiwan Fin Hub</p>
+              <p class="mt-0.5 text-xs text-muted-foreground">Personal finance console</p>
+            </div>
+          </div>
           <button
-            class={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[11px] font-semibold transition ${primaryView === item.view ? "bg-accent text-steel" : "text-muted-foreground"}`}
-            onclick={() => navigate(item.view)}
-            ><NavIcon class="size-5" />{item.shortLabel}</button
+            type="button"
+            class="grid size-11 place-items-center rounded-xl text-muted-foreground transition hover:bg-secondary hover:text-ink active:scale-95"
+            aria-label="關閉主要選單"
+            onclick={() => (mobileNavOpen = false)}
           >
-        {/each}
-        <button
-          class={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[11px] font-semibold transition ${view === "more" || !mobilePrimaryViews.includes(primaryView) ? "bg-accent text-steel" : "text-muted-foreground"}`}
-          onclick={() => navigate("more")}
-          ><Ellipsis class="size-5" />更多</button
-        >
-      </nav>
+            <X class="size-5" />
+          </button>
+        </div>
+
+        <nav class="grid gap-2 overflow-y-auto p-4" aria-label="行動版主要導覽">
+          {#each navItems as item (item.view)}
+            {@const NavIcon = item.icon}
+            <button
+              class={`c-drawer-nav-item ${primaryView === item.view ? "is-active" : ""}`}
+              aria-current={primaryView === item.view ? "page" : undefined}
+              onclick={() => navigate(item.view)}
+            >
+              <span class="c-drawer-nav-icon"><NavIcon class="size-5" /></span>
+              <span class="min-w-0 flex-1 text-left">
+                <span class="block font-semibold">{item.label}</span>
+                <span class="mt-0.5 block truncate text-xs text-muted-foreground">
+                  {item.description}
+                </span>
+              </span>
+              <ChevronRight class="size-4 shrink-0 text-muted-foreground" />
+            </button>
+          {/each}
+        </nav>
+
+        <div class="mt-auto border-t border-border p-5">
+          <div class="rounded-xl bg-secondary/65 p-4">
+            <p class="text-xs font-semibold text-ink/65">目前位置</p>
+            <p class="mt-1 font-semibold">{pageTitle}</p>
+            <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+              {pageDescription}
+            </p>
+          </div>
+        </div>
+      </aside>
     {/if}
   </div>
 </QueryClientProvider>
