@@ -139,8 +139,15 @@
     document.documentElement.classList.contains("is-standalone");
   function scrollToTop() {
     const options: ScrollToOptions = { top: 0, behavior: "smooth" };
-    if (isStandalone()) document.getElementById("root")?.scrollTo(options);
-    else window.scrollTo(options);
+    requestAnimationFrame(() => {
+      const internalScrollArea = document.getElementById("app-scroll-area");
+      if (internalScrollArea) {
+        internalScrollArea.scrollTo(options);
+        return;
+      }
+      if (isStandalone()) document.getElementById("root")?.scrollTo(options);
+      else window.scrollTo(options);
+    });
   }
 
   onMount(() => {
@@ -201,14 +208,14 @@
 
 <QueryClientProvider client={queryClient}>
   <div
-    class="min-h-screen bg-paper text-ink xl:grid xl:grid-cols-[216px_minmax(0,1fr)]"
+    class={`bg-paper text-ink xl:grid xl:grid-cols-[216px_minmax(0,1fr)] ${primaryView === "settings" ? "h-[100dvh] overflow-hidden" : "min-h-screen"}`}
     use:swipeBack={{
       enabled: isStandalone() && (isDetail(view) || isMobileSetting(view)),
       onBack: navigateBack,
     }}
   >
     <aside
-      class="hidden border-r border-white/8 bg-ink px-4 py-5 text-white xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col"
+      class="hidden border-r border-white/8 bg-ink px-4 py-5 text-white xl:sticky xl:top-0 xl:flex xl:h-[100dvh] xl:flex-col"
     >
       <div class="border-b border-white/8 px-3 pb-5 pt-1">
         <h1 class="text-[17px] font-semibold tracking-[-0.02em]">
@@ -241,12 +248,10 @@
     </aside>
 
     <div
-      class:min-w-0={true}
-      class:pb-20={!mobileSetting}
-      class:pb-5={!!mobileSetting}
+      class={`min-w-0 ${primaryView === "settings" ? "flex h-[100dvh] min-h-0 flex-col overflow-hidden" : mobileSetting ? "pb-5" : "pb-20"}`}
     >
       <div
-        class="no-scrollbar hidden border-b border-border bg-white px-4 py-2 md:flex md:gap-1 md:overflow-x-auto xl:hidden"
+        class="no-scrollbar hidden shrink-0 border-b border-border bg-white px-4 py-2 md:flex md:gap-1 md:overflow-x-auto xl:hidden"
       >
         {#each navItems as item (item.view)}
           {@const NavIcon = item.icon}
@@ -258,10 +263,12 @@
         {/each}
       </div>
       <header
-        class="sticky top-0 z-20 border-b border-border bg-white/92 backdrop-blur-md xl:static xl:border-b-0 xl:bg-transparent xl:backdrop-blur-0"
+        class="sticky top-0 z-20 shrink-0 border-b border-border bg-white/92 backdrop-blur-md xl:static xl:border-b-0 xl:bg-transparent xl:backdrop-blur-0"
       >
         <div
-          class="mx-auto flex max-w-[1440px] flex-col gap-3 px-4 py-3.5 sm:px-6 xl:px-8 xl:pb-3 xl:pt-7"
+          class={primaryView === "settings"
+            ? "flex w-full flex-col gap-3 px-4 py-3.5 sm:px-6 xl:px-8 xl:pb-3 xl:pt-7"
+            : "mx-auto flex max-w-[1440px] flex-col gap-3 px-4 py-3.5 sm:px-6 xl:px-8 xl:pb-3 xl:pt-7"}
         >
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0">
@@ -337,7 +344,9 @@
       </header>
 
       <main
-        class="mx-auto max-w-[1440px] px-4 pb-6 pt-1 sm:px-6 md:py-5 xl:px-8 xl:pb-8 xl:pt-3"
+        class={primaryView === "settings"
+          ? "min-h-0 flex-1 overflow-hidden"
+          : "mx-auto max-w-[1440px] px-4 pb-6 pt-1 sm:px-6 md:py-5 xl:px-8 xl:pb-8 xl:pt-3"}
       >
         {#if view === "overview"}<Overview {api} {navigate} />
         {:else if view === "assets"}<Assets {api} {navigate} />
@@ -358,14 +367,16 @@
             {navigate}
           />{/if}
       </main>
-      <footer
-        class="mx-auto hidden max-w-[1440px] border-t border-border px-4 py-6 sm:px-6 md:block xl:px-8"
-      >
-        <p class="text-xs leading-relaxed text-ink/35">
-          <strong class="font-medium text-ink/60">免責聲明：</strong
-          >本程式僅供個人研究與自用，未與臺灣集中保管結算所、財政部、金融監督管理委員會、各銀行或任何金融機構合作，亦未獲前述機構授權或背書。本程式所呈現的資料以您自行提供之憑證取得，作者不保證資料的即時性、正確性與完整性，亦不對因使用本程式所產生的任何直接或間接損失負責。請勿將本程式用於任何商業用途。
-        </p>
-      </footer>
+      {#if primaryView !== "settings"}
+        <footer
+          class="mx-auto hidden max-w-[1440px] border-t border-border px-4 py-6 sm:px-6 md:block xl:px-8"
+        >
+          <p class="text-xs leading-relaxed text-ink/35">
+            <strong class="font-medium text-ink/60">免責聲明：</strong
+            >本程式僅供個人研究與自用，未與臺灣集中保管結算所、財政部、金融監督管理委員會、各銀行或任何金融機構合作，亦未獲前述機構授權或背書。本程式所呈現的資料以您自行提供之憑證取得，作者不保證資料的即時性、正確性與完整性，亦不對因使用本程式所產生的任何直接或間接損失負責。請勿將本程式用於任何商業用途。
+          </p>
+        </footer>
+      {/if}
     </div>
 
     {#if !mobileSetting}
