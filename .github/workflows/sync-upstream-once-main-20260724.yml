@@ -1,0 +1,42 @@
+name: Sync upstream once from main
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  sync-upstream:
+    if: github.event.head_commit.message == 'chore: trigger upstream sync from main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/TedLin1993/taiwan-fin-hub.git
+          git fetch upstream main
+          git merge --no-ff upstream/main -m "Merge upstream/main into main"
+
+      - name: Remove this temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/sync-upstream-once-main-20260724.yml
+          git add .github/workflows/sync-upstream-once-main-20260724.yml
+          git commit -m "chore: remove temporary upstream sync workflow"
+
+      - name: Push synchronized main
+        shell: bash
+        run: git push origin main
