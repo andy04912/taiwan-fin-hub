@@ -111,6 +111,30 @@ jobs:
           fi
 
           git replace -d "$sync_commit"
+
+          # Keep the current working UI at its original entry points while
+          # retaining upstream's new app/data/shared architecture in parallel.
+          git checkout "$main_before" -- apps/web/src
+          git checkout upstream/main -- \
+            apps/web/src/app \
+            apps/web/src/data \
+            apps/web/src/shared \
+            apps/web/src/testing \
+            apps/web/src/features/activity/ActivityPage.svelte \
+            apps/web/src/features/activity/components \
+            apps/web/src/features/activity/model \
+            apps/web/src/features/assets/AssetsPage.svelte \
+            apps/web/src/features/assets/model \
+            apps/web/src/features/invoices/InvoicesPage.svelte \
+            apps/web/src/features/overview/OverviewPage.svelte \
+            apps/web/src/features/overview/components \
+            apps/web/src/features/overview/model \
+            apps/web/src/features/settings/SettingsPage.svelte \
+            apps/web/src/features/settings/components \
+            apps/web/src/features/settings/connectors
+          git add -A
+          git commit -m "Resolve frontend architecture merge while preserving current UI"
+
           merge_commit="$(git rev-parse HEAD)"
           merge_tree="$(git rev-parse HEAD^{tree})"
 
