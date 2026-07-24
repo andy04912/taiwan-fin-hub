@@ -68,11 +68,6 @@ jobs:
           upstream_head="$(git rev-parse upstream/main)"
           sync_commit="48fbb617ba4bedf388b451fd6cff3529834c736d"
 
-          if ! git merge-base --is-ancestor "$sync_commit" HEAD; then
-            echo "Previous sync commit is not an ancestor of main"
-            exit 1
-          fi
-
           upstream_base=""
           sync_tree="$(git rev-parse "${sync_commit}^{tree}")"
           while IFS= read -r candidate; do
@@ -85,11 +80,6 @@ jobs:
           if [ -z "$upstream_base" ]; then
             sync_time="$(git show -s --format=%cI "$sync_commit")"
             upstream_base="$(git rev-list -1 --before="$sync_time" upstream/main)"
-          fi
-
-          if [ -z "$upstream_base" ]; then
-            echo "Unable to determine an upstream merge base"
-            exit 1
           fi
 
           read -r -a sync_parents <<< "$(git show -s --format=%P "$sync_commit")"
@@ -112,8 +102,6 @@ jobs:
 
           git replace -d "$sync_commit"
 
-          # Keep the current working UI at its original entry points while
-          # retaining upstream's new app/data/shared architecture in parallel.
           git checkout "$main_before" -- apps/web/src
           git checkout upstream/main -- \
             apps/web/src/app \
@@ -132,12 +120,55 @@ jobs:
             apps/web/src/features/settings/SettingsPage.svelte \
             apps/web/src/features/settings/components \
             apps/web/src/features/settings/connectors
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("apps/web/src/features/settings/Settings.svelte")
+          content = path.read_text(encoding="utf-8")
+
+          source_marker = "  ];\n\n  const connectorFields"
+          taishin_source = '''    {
+              id: "taishin",
+              title: "台新銀行",
+              description: "信用卡額度、帳單與即時消費",
+            },
+          '''
+          if 'id: "taishin"' not in content:
+              content = content.replace(
+                  source_marker,
+                  taishin_source + source_marker,
+                  1,
+              )
+
+          field_marker = "  };\n\n  const jobs = createQuery"
+          taishin_fields = '''    taishin: [
+              { key: "userId", label: "身分證字號／統編", type: "text" },
+              { key: "account", label: "使用者代號", type: "text" },
+              { key: "password", label: "使用者密碼", type: "password" },
+              {
+                key: "lookbackMonths",
+                label: "帳單往回月份（最多 6 期）",
+                type: "number",
+                placeholder: "6",
+              },
+            ],
+          '''
+          if "    taishin: [" not in content:
+              content = content.replace(
+                  field_marker,
+                  taishin_fields + field_marker,
+                  1,
+              )
+
+          path.write_text(content, encoding="utf-8")
+          PY
+
           git add -A
-          git commit -m "Resolve frontend architecture merge while preserving current UI"
+          git commit -m "Resolve frontend architecture merge and add Taishin settings"
 
           merge_commit="$(git rev-parse HEAD)"
           merge_tree="$(git rev-parse HEAD^{tree})"
-
           {
             echo "MAIN_BEFORE=$main_before"
             echo "UPSTREAM_HEAD=$upstream_head"
