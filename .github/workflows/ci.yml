@@ -38,7 +38,7 @@ jobs:
 
   # Temporary one-time job; removed after the upstream synchronization finishes.
   sync-upstream:
-    if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'chore: execute upstream sync')
+    if: "${{ github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'chore: execute upstream sync') }}"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
