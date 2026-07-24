@@ -55,7 +55,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Merge upstream while preserving local conflicts
+      - name: Bridge histories and merge upstream
         shell: bash
         run: |
           set -euo pipefail
@@ -64,34 +64,58 @@ jobs:
           git remote add upstream https://github.com/TedLin1993/taiwan-fin-hub.git
           git fetch upstream main
 
+          sync_commit="48fbb617ba4bedf388b451fd6cff3529834c736d"
+          if ! git merge-base --is-ancestor "$sync_commit" HEAD; then
+            echo "Previous sync commit is not an ancestor of main"
+            exit 1
+          fi
+
+          upstream_base=""
+          sync_tree="$(git rev-parse "${sync_commit}^{tree}")"
+          while IFS= read -r candidate; do
+            if [ "$(git rev-parse "${candidate}^{tree}")" = "$sync_tree" ]; then
+              upstream_base="$candidate"
+              break
+            fi
+          done < <(git rev-list upstream/main)
+
+          if [ -z "$upstream_base" ]; then
+            sync_time="$(git show -s --format=%cI "$sync_commit")"
+            upstream_base="$(git rev-list -1 --before="$sync_time" upstream/main)"
+            echo "No exact tree match; using upstream commit before previous sync time: $upstream_base"
+          else
+            echo "Matched previous sync tree to upstream commit: $upstream_base"
+          fi
+
+          if [ -z "$upstream_base" ]; then
+            echo "Unable to determine an upstream merge base"
+            exit 1
+          fi
+
+          read -r -a sync_parents <<< "$(git show -s --format=%P "$sync_commit")"
+          git replace --graft "$sync_commit" "${sync_parents[@]}" "$upstream_base"
+
           set +e
           git merge --no-ff -X ours upstream/main -m "Merge upstream/main into main"
           merge_status=$?
           set -e
 
           if [ "$merge_status" -ne 0 ]; then
-            echo "Resolving every remaining unmerged index entry in favor of current main"
+            echo "Resolving remaining conflicts in favor of current main"
             git checkout --ours -- . || true
             git add -A
 
             if git diff --name-only --diff-filter=U | grep -q .; then
-              conflict_report="$(git diff --name-only --diff-filter=U)"
-              printf '%s\n' "$conflict_report" > /tmp/upstream-conflicts.txt
               echo "Unresolved conflicts remain:"
-              cat /tmp/upstream-conflicts.txt
-
-              git merge --abort || git reset --hard HEAD
-              git checkout -B automation/upstream-conflict-report main
-              mkdir -p .github
-              cp /tmp/upstream-conflicts.txt .github/upstream-conflicts-20260724.txt
-              git add .github/upstream-conflicts-20260724.txt
-              git commit -m "chore: record unresolved upstream conflicts"
-              git push --force origin HEAD:automation/upstream-conflict-report
+              git diff --name-only --diff-filter=U
               exit 1
             fi
 
             git commit -m "Merge upstream/main into main"
           fi
+
+          git replace -d "$sync_commit"
+          echo "Merge parents: $(git show -s --format=%P HEAD)"
 
       - name: Validate merged result
         shell: bash
@@ -152,6 +176,7 @@ jobs:
           rm -f .github/execute-upstream-sync-run-20260724
           rm -f .github/execute-upstream-sync-final-run-20260724
           rm -f .github/execute-upstream-sync-index-run-20260724
+          rm -f .github/execute-upstream-sync-bridge-run-20260724
           git add -A
           if ! git diff --cached --quiet; then
             git commit -m "chore: clean up temporary upstream sync setup"
@@ -168,6 +193,7 @@ jobs:
             automation/execute-upstream-sync-run-20260724 \
             automation/execute-upstream-sync-final-run-20260724 \
             automation/execute-upstream-sync-index-run-20260724 \
+            automation/execute-upstream-sync-bridge-run-20260724 \
             automation/fix-sync-workflow-syntax-20260724 \
             automation/register-sync-workflow-20260724 \
             automation/run-upstream-sync-20260724 \
