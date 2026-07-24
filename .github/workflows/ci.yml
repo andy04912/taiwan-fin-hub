@@ -36,7 +36,7 @@ jobs:
       - name: Build
         run: npm run build
 
-  # Temporary one-time job; removed automatically after synchronization.
+  # Temporary one-time job; removed after synchronization.
   sync-upstream:
     if: "${{ github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'chore: execute upstream sync') }}"
     runs-on: ubuntu-latest
@@ -55,7 +55,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Bridge histories, merge upstream, and publish candidate
+      - name: Bridge histories and create merged candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -64,7 +64,10 @@ jobs:
           git remote add upstream https://github.com/TedLin1993/taiwan-fin-hub.git
           git fetch upstream main
 
+          main_before="$(git rev-parse HEAD)"
+          upstream_head="$(git rev-parse upstream/main)"
           sync_commit="48fbb617ba4bedf388b451fd6cff3529834c736d"
+
           if ! git merge-base --is-ancestor "$sync_commit" HEAD; then
             echo "Previous sync commit is not an ancestor of main"
             exit 1
@@ -82,9 +85,6 @@ jobs:
           if [ -z "$upstream_base" ]; then
             sync_time="$(git show -s --format=%cI "$sync_commit")"
             upstream_base="$(git rev-list -1 --before="$sync_time" upstream/main)"
-            echo "No exact tree match; using upstream commit before previous sync time: $upstream_base"
-          else
-            echo "Matched previous sync tree to upstream commit: $upstream_base"
           fi
 
           if [ -z "$upstream_base" ]; then
@@ -104,7 +104,6 @@ jobs:
             git checkout --ours -- . || true
             git add -A
             if git diff --name-only --diff-filter=U | grep -q .; then
-              echo "Unresolved conflicts remain:"
               git diff --name-only --diff-filter=U
               exit 1
             fi
@@ -112,102 +111,66 @@ jobs:
           fi
 
           git replace -d "$sync_commit"
-          echo "Merge parents: $(git show -s --format=%P HEAD)"
-          git push --force origin HEAD:automation/upstream-merged-candidate
+          merge_commit="$(git rev-parse HEAD)"
+          merge_tree="$(git rev-parse HEAD^{tree})"
+
+          {
+            echo "MAIN_BEFORE=$main_before"
+            echo "UPSTREAM_HEAD=$upstream_head"
+            echo "UPSTREAM_BASE=$upstream_base"
+            echo "MERGE_COMMIT=$merge_commit"
+            echo "MERGE_TREE=$merge_tree"
+          } > /tmp/upstream-merge-metadata.txt
+
+          git bundle create /tmp/upstream-merged.bundle HEAD
+          git archive --format=tar.gz -o /tmp/upstream-merged-tree.tar.gz HEAD
+
+      - name: Upload merged candidate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-merged-candidate
+          path: |
+            /tmp/upstream-merged.bundle
+            /tmp/upstream-merged-tree.tar.gz
+            /tmp/upstream-merge-metadata.txt
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Install merged dependencies
-        run: npm ci
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci 2>&1 | tee /tmp/upstream-validation-npm-ci.log
 
       - name: Typecheck merged result
-        run: npm run typecheck
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run typecheck 2>&1 | tee /tmp/upstream-validation-typecheck.log
 
       - name: Test merged backend
-        run: npm run test:backend
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:backend 2>&1 | tee /tmp/upstream-validation-test-backend.log
 
       - name: Test merged frontend
-        run: npm run test:unit
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:unit 2>&1 | tee /tmp/upstream-validation-test-frontend.log
 
       - name: Build merged result
-        run: npm run build
-
-      - name: Remove temporary synchronization setup
         shell: bash
         run: |
-          set -euo pipefail
-          cat > .github/workflows/ci.yml <<'EOF'
-          name: CI
+          set -o pipefail
+          npm run build 2>&1 | tee /tmp/upstream-validation-build.log
 
-          on:
-            push:
-            pull_request:
-
-          jobs:
-            validate:
-              runs-on: ubuntu-latest
-              timeout-minutes: 15
-              steps:
-                - name: Checkout
-                  uses: actions/checkout@v4
-
-                - name: Setup Node.js
-                  uses: actions/setup-node@v4
-                  with:
-                    node-version: 22
-                    cache: npm
-
-                - name: Install dependencies
-                  run: npm ci
-
-                - name: Typecheck
-                  run: npm run typecheck
-
-                - name: Test backend
-                  run: npm run test:backend
-
-                - name: Test frontend
-                  run: npm run test:unit
-
-                - name: Build
-                  run: npm run build
-          EOF
-
-          rm -f .github/workflows/sync-upstream-once-main-20260724.yml
-          rm -f .github/sync-upstream-trigger-20260724
-          rm -f .github/sync-upstream-pr-trigger-20260724
-          rm -f .github/execute-upstream-sync-20260724
-          rm -f .github/execute-upstream-sync-final-20260724
-          rm -f .github/execute-upstream-sync-run-20260724
-          rm -f .github/execute-upstream-sync-final-run-20260724
-          rm -f .github/execute-upstream-sync-index-run-20260724
-          rm -f .github/execute-upstream-sync-bridge-run-20260724
-          rm -f .github/execute-upstream-sync-report-run-20260724
-          rm -f .github/execute-upstream-sync-candidate-run-20260724
-          rm -f .github/upstream-validation-report-20260724.txt
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: clean up temporary upstream sync setup"
-          fi
-
-      - name: Push synchronized main and remove temporary branches
-        shell: bash
-        run: |
-          set -euo pipefail
-          git push origin main
-          for branch in \
-            automation/execute-upstream-sync-20260724 \
-            automation/execute-upstream-sync-final-20260724 \
-            automation/execute-upstream-sync-run-20260724 \
-            automation/execute-upstream-sync-final-run-20260724 \
-            automation/execute-upstream-sync-index-run-20260724 \
-            automation/execute-upstream-sync-bridge-run-20260724 \
-            automation/execute-upstream-sync-report-run-20260724 \
-            automation/execute-upstream-sync-candidate-run-20260724 \
-            automation/fix-sync-workflow-syntax-20260724 \
-            automation/register-sync-workflow-20260724 \
-            automation/run-upstream-sync-20260724 \
-            automation/sync-upstream-20260724 \
-            automation/trigger-upstream-sync-20260724 \
-            automation/upstream-conflict-report \
-            automation/upstream-merged-candidate; do
-            git push origin --delete "$branch" || true
-          done
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-validation-logs
+          path: /tmp/upstream-validation-*.log
+          if-no-files-found: warn
+          retention-days: 1
