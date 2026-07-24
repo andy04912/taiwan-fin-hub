@@ -427,12 +427,14 @@ type EsunTimelineCandidate = {
   timelinePage: EsunTimelinePage;
   timelineMonth: EsunTimelineMonth;
   accountId: string;
-  postedDate: string;
+  authorizedAt: string;
+  postedDate?: string;
   amount: number;
   currency: string;
   description: string;
   sourceKey: string;
   lifecycle: string;
+  status: "pending" | "posted";
   order: number;
 };
 
@@ -447,19 +449,24 @@ export function normalizeEsunTimelineTransactions(
       if (!year) continue;
 
       for (const txn of month.txnList ?? []) {
-        const postedDate = normalizeEsunMonthDay(
+        const lifecycle = txn.acfg?.trim() ?? "";
+        const authorizedAt = normalizeEsunMonthDay(
           year,
           txn.consumerDt ?? txn.postingDt ?? "",
         );
-        const amount = parseTwd(txn.payAmt ?? txn.consumerAmt ?? "0");
+        const postedDate = lifecycle === "未入帳"
+          ? undefined
+          : normalizeEsunMonthDay(year, txn.postingDt ?? txn.consumerDt ?? "");
+        const rawAmount = parseTwd(txn.payAmt ?? txn.consumerAmt ?? "0");
         const currency = txn.payCur?.trim() || txn.consumerCur?.trim() || "TWD";
         const description = txn.storeName?.trim() || "玉山信用卡交易";
+        const amount = signedCreditCardAmount(rawAmount, description);
         const accountId = creditCardSourceId(txn.cardNo);
         const sourceKey = [
-          postedDate,
+          authorizedAt,
           accountId,
           description,
-          amount,
+          rawAmount,
           currency,
         ].join(":");
         candidates.push({
@@ -467,12 +474,14 @@ export function normalizeEsunTimelineTransactions(
           timelinePage,
           timelineMonth: month,
           accountId,
+          authorizedAt,
           postedDate,
           amount,
           currency,
           description,
           sourceKey,
-          lifecycle: txn.acfg?.trim() ?? "",
+          lifecycle,
+          status: lifecycle === "未入帳" ? "pending" : "posted",
           order: candidates.length,
         });
       }
@@ -507,10 +516,12 @@ export function normalizeEsunTimelineTransactions(
       accountId: candidate.accountId,
       sourceId: `${candidate.sourceKey}:${occurrence}`,
       postedDate: candidate.postedDate,
+      authorizedAt: candidate.authorizedAt,
       amount: candidate.amount,
       currency: candidate.currency,
       description: candidate.description,
       counterparty: candidate.description,
+      status: candidate.status,
       raw: {
         ...candidate.transaction,
         timelineYear: candidate.timelineMonth.year,
@@ -807,6 +818,15 @@ function normalizeEsunTxDateTime(txDate: string | null | undefined, txTime: stri
 function parseTwd(text: string): number {
   const n = Number(text.replace(/[^0-9.-]/g, ""));
   return Number.isFinite(n) ? Math.round(n) : 0;
+}
+
+function signedCreditCardAmount(rawAmount: number, description: string) {
+  const isCredit =
+    rawAmount < 0 ||
+    /退款|退貨|折抵|折讓|回饋|沖銷|貸方|繳款|自動轉帳扣繳|refund|credit|payment/i.test(
+      description,
+    );
+  return isCredit ? Math.abs(rawAmount) : -Math.abs(rawAmount);
 }
 
 // Format "0YYYMMDD" where YYY = 民國 year (e.g. "01150629" → "2026/06/29")

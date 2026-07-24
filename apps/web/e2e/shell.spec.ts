@@ -3,6 +3,10 @@ import { expect, test } from "@playwright/test";
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (!path.startsWith("/api/")) {
+      await route.continue();
+      return;
+    }
     let body: unknown;
     if (path === "/api/runtime") body = { demoMode: true };
     else if (path === "/api/summary")
@@ -23,7 +27,7 @@ test.beforeEach(async ({ page }) => {
     else if (path === "/api/activity/invoice-mappings") body = [];
     else if (path === "/api/manual-assets") body = [];
     else if (path === "/api/exchange-rates") body = [];
-    else if (path === "/api/history/net-worth") body = [];
+    else if (path === "/api/history/net-worth/chart") body = [];
     else if (path === "/api/sync-jobs") body = [];
     else if (path === "/api/classification/categories")
       body = [
@@ -68,7 +72,11 @@ test("loads the responsive shell and changes primary views", async ({
     page.getByRole("heading", { name: "總覽", exact: true }),
   ).toBeVisible();
 
-  await page.getByRole("button", { name: "資產" }).first().click();
+  await page
+    .getByRole("button", { name: "資產", exact: true })
+    .filter({ visible: true })
+    .first()
+    .click();
   await expect(
     page.getByRole("heading", { name: "資產", exact: true }),
   ).toBeVisible();

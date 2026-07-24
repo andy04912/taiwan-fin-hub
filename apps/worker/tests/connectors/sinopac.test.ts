@@ -125,15 +125,55 @@ const mobileUnbilledPayload = [{
   ]
 }];
 
+const sinoCardSsoPayload = {
+  Result: { ID: "A123456789" }, Header: {}, ResultCode: "00", ResultMessage: "", Error: null
+};
+const sinoCardAuthPayload = { Result: {}, Header: {}, ResultCode: "00", ResultMessage: "", Error: null };
+const sinoCardLatestPayload = {
+  Result: {
+    IsCompanyUser: false,
+    Items: [
+      {
+        CardFlag: "P", CardNo: "************8000", IsMobileCard: false,
+        AuthDate: "2026/07/19", AuthTime: "18:35:13", Memo: "餐廳/LINE Pay",
+        AuthAmt: 260, AuthAmtDesc: "260", CountryCode: "TW", AuthResult: "Y"
+      },
+      {
+        CardFlag: "P", CardNo: "************1234", IsMobileCard: false,
+        AuthDate: "2026/07/19", AuthTime: "20:10:00", Memo: "另一張卡的同額消費",
+        AuthAmt: 260, AuthAmtDesc: "260", CountryCode: "TW", AuthResult: "Y"
+      }
+    ]
+  }, Header: {}, ResultCode: "00", ResultMessage: "", Error: null
+};
+const sinoCardOutstandingPayload = {
+  Result: {
+    IsExcludePaidUp: false,
+    Detail: [{
+      CurrencyCode: "TWD", CurrencyName: "臺幣", PID: "", CARD_TYPE: "正卡", CardLast4: "8000",
+      TXDATE: "2026/07/19", DEDATE: "2026/07/22", TXCODE: "", MEMO: "連支＊餐廳",
+      TXCUR: "TWD", TXAMT: "260", AMT: "260", PROD: "", EMBOSSING_TYPE: "",
+      CardNoLast4: "8000", CARDNAME: "測試信用卡"
+    }],
+    SubTotal: [{ CurrencyCode: "TWD", CurrencyName: "臺幣", Count: 1, SubTotalAmt: "260" }],
+    IsCompanyUser: false
+  }, Header: {}, ResultCode: "00", ResultMessage: "", Error: null
+};
+
 const sessionCookies = JSON.stringify([{
   name: "ASP.NET_SessionId",
   value: "test-session",
   domain: "m.sinopac.com"
 }]);
 
-function cookieValue(serialized: string, name: string) {
-  const cookies = JSON.parse(serialized) as Array<{ name?: string; value?: string }>;
-  return cookies.find((cookie) => cookie.name === name)?.value;
+function payloadForUrl(url: string) {
+  if (url.includes("ws_cardsum")) return summaryPayload;
+  if (url.includes("ws_cardbilling_sp")) return billPayload;
+  if (url.endsWith("/security/sso")) return sinoCardSsoPayload;
+  if (url.endsWith("/security/auth")) return sinoCardAuthPayload;
+  if (url.endsWith("/Accounting/LatestTx")) return sinoCardLatestPayload;
+  if (url.endsWith("/Accounting/OutstandingDetail")) return sinoCardOutstandingPayload;
+  throw new Error(`Unexpected URL: ${url}`);
 }
 
 describe("sinopac App JSON parser", () => {
@@ -177,12 +217,14 @@ describe("sinopac App JSON parser", () => {
       expect.objectContaining({
         postedDate: "2026-07-16",
         amount: -1280,
-        description: "全聯福利中心"
+        description: "全聯福利中心",
+        status: "posted"
       }),
       expect.objectContaining({
         postedDate: "2026-07-16",
         amount: 500,
-        description: "網購退貨退款"
+        description: "網購退貨退款",
+        status: "posted"
       })
     ]);
   });
@@ -222,30 +264,66 @@ describe("sinopac App JSON parser", () => {
     ]);
   });
 
-  it("uses the three App endpoints without acquiring a browser when session cookies exist", async () => {
-    const fetchMock = vi.fn(async function(this: unknown, input: RequestInfo | URL) {
+  it("maps latest authorizations to pending and upgrades matching card transactions to posted", () => {
+    const result = parseSinopacCardData({
+      summary: mobileSummaryPayload,
+      bills: mobileBillPayload,
+      latest: sinoCardLatestPayload,
+      outstanding: sinoCardOutstandingPayload
+    }, 3, new Date("2026-07-22T12:00:00.000Z"));
+
+    expect(result.bankTransactions).toHaveLength(2);
+    expect(result.bankTransactions).toEqual([
+      expect.objectContaining({
+        sourceId: "sinopac:card:tx:v2:TWD:2026-07-19:-260:8000:1",
+        authorizedAt: "2026-07-19",
+        postedDate: "2026-07-22",
+        description: "連支＊餐廳",
+        amount: -260,
+        status: "posted"
+      }),
+      expect.objectContaining({
+        sourceId: "sinopac:card:tx:v2:TWD:2026-07-19:-260:1234:1",
+        authorizedAt: "2026-07-19T20:10:00+08:00",
+        description: "另一張卡的同額消費",
+        amount: -260,
+        status: "pending"
+      })
+    ]);
+    expect(result.bankTransactions[0]?.raw).toMatchObject({ CardNoLast4: "8000" });
+    expect(result.bankTransactions[1]?.raw).toMatchObject({ CardNo: "************1234" });
+  });
+
+  it("uses the App and SinoCard endpoints without acquiring a browser when session cookies exist", async () => {
+    const fetchMock = vi.fn(async function(this: unknown, input: RequestInfo | URL, _init?: RequestInit) {
       expect(this).toBe(globalThis);
       const url = String(input);
-      const payload = url.includes("ws_cardsum")
-        ? summaryPayload
-        : url.includes("ws_cardbilling_sp")
-          ? billPayload
-          : unbilledPayload;
-      return new Response(JSON.stringify(payload), { status: 200 });
+      return new Response(JSON.stringify(payloadForUrl(url)), { status: 200 });
     });
 
     const result = await createSinopacConnector(undefined, fetchMock as typeof fetch).sync({
+      userId: "A123456789",
       sessionCookies,
       protocol: "sinopac-mobile-app-json-v1",
       lookbackMonths: 3
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "https://m.sinopac.com/ws/card/cardqry/ws_cardsum.ashx",
       "https://m.sinopac.com/ws/card/cardqry/ws_cardbilling_sp.ashx?TxDate=default&TxType=01",
-      "https://m.sinopac.com/ws/card/cardqry/ws_nonbilling.ashx"
+      "https://m.sinopac.com/m/SinoCard/api/security/sso",
+      "https://m.sinopac.com/m/SinoCard/api/security/auth",
+      "https://m.sinopac.com/m/SinoCard/api/Accounting/LatestTx",
+      "https://m.sinopac.com/m/SinoCard/api/Accounting/OutstandingDetail"
     ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body))).toMatchObject({
+      Content: { ID: "A123456789" },
+      Header: { ApplicationName: "MWEB", UserID: "A123456789" }
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body))).toMatchObject({
+      Content: { IsExcludePaidUp: false, ID: "A123456789", DateYYYYMMDD: "" }
+    });
     expect(result.records).toEqual([]);
     expect(result.bankTransactions).toHaveLength(2);
     expect(JSON.parse(result.cursor ?? "{}")).toMatchObject({
@@ -254,180 +332,36 @@ describe("sinopac App JSON parser", () => {
     });
   });
 
-  it("applies rotated mobile cookies within a run and stores them as a candidate", async () => {
-    const rotatingCookies = JSON.stringify([
+  it("isolates App cookies and follows SinoCard cookie rotation", async () => {
+    const authCookies = JSON.stringify([
       ...JSON.parse(sessionCookies),
-      { name: "sinopac_cookie", value: "stale-cookie", domain: "m.sinopac.com", path: "/" }
+      { name: "sinopac_cookie", value: "browser-cookie", domain: "m.sinopac.com", path: "/" }
     ]);
     const requestCookies: string[] = [];
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      requestCookies.push(new Headers(init?.headers).get("cookie") ?? "");
-      const call = requestCookies.length;
-      const payload = call === 1 ? summaryPayload : call === 2 ? billPayload : unbilledPayload;
-      const nextCookie = call === 1 ? "summary-cookie" : call === 2 ? "billing-cookie" : "unbilled-cookie";
-      return new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { "Set-Cookie": `sinopac_cookie=${nextCookie}; Path=/; HttpOnly; Secure` }
-      });
-    });
-
-    const result = await createSinopacConnector(undefined, fetchMock as typeof fetch).sync({
-      sessionCookies: rotatingCookies,
-      protocol: "sinopac-mobile-app-json-v1"
-    });
-
-    expect(requestCookies[0]).toContain("sinopac_cookie=stale-cookie");
-    expect(requestCookies[1]).toContain("sinopac_cookie=summary-cookie");
-    expect(requestCookies[2]).toContain("sinopac_cookie=billing-cookie");
-    const cursor = JSON.parse(result.cursor ?? "{}") as {
-      sessionCookies: string;
-      candidateSessionCookies: string;
-      candidateSessionCreatedAt: string;
-    };
-    expect(cookieValue(cursor.sessionCookies, "sinopac_cookie")).toBe("stale-cookie");
-    expect(cookieValue(cursor.candidateSessionCookies, "sinopac_cookie")).toBe("unbilled-cookie");
-    expect(cursor.candidateSessionCreatedAt).toBeTruthy();
-  });
-
-  it("promotes a candidate only after it succeeds in a later sync", async () => {
-    const stableCookies = JSON.stringify([
-      ...JSON.parse(sessionCookies),
-      { name: "sinopac_cookie", value: "stable-cookie", domain: "m.sinopac.com", path: "/" }
-    ]);
-    const candidateCookies = JSON.stringify([
-      ...JSON.parse(sessionCookies),
-      { name: "sinopac_cookie", value: "candidate-cookie", domain: "m.sinopac.com", path: "/" }
-    ]);
-    const requestCookies: string[] = [];
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      requestCookies.push(new Headers(init?.headers).get("cookie") ?? "");
-      const call = requestCookies.length;
-      const payload = call === 1 ? summaryPayload : call === 2 ? billPayload : unbilledPayload;
-      return new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { "Set-Cookie": `sinopac_cookie=next-${call}; Path=/; HttpOnly; Secure` }
-      });
-    });
-
-    const result = await createSinopacConnector(undefined, fetchMock as typeof fetch).sync({
-      sessionCookies: stableCookies,
-      candidateSessionCookies: candidateCookies,
-      protocol: "sinopac-mobile-app-json-v1"
-    });
-
-    const cursor = JSON.parse(result.cursor ?? "{}") as {
-      sessionCookies: string;
-      candidateSessionCookies: string;
-    };
-    expect(requestCookies).toHaveLength(3);
-    expect(requestCookies[0]).toContain("sinopac_cookie=candidate-cookie");
-    expect(cookieValue(cursor.sessionCookies, "sinopac_cookie")).toBe("candidate-cookie");
-    expect(cookieValue(cursor.candidateSessionCookies, "sinopac_cookie")).toBe("next-3");
-  });
-
-  it("refreshes a scheduled session with one lightweight canary request", async () => {
-    const stableCookies = JSON.stringify([
-      ...JSON.parse(sessionCookies),
-      { name: "sinopac_cookie", value: "stable-cookie", domain: "m.sinopac.com", path: "/" }
-    ]);
-    const requestCookies: string[] = [];
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      requestCookies.push(new Headers(init?.headers).get("cookie") ?? "");
-      return new Response(JSON.stringify(summaryPayload), {
-        headers: { "Set-Cookie": "sinopac_cookie=refreshed-cookie; Path=/; HttpOnly; Secure" }
-      });
-    });
-
-    const refreshed = await createSinopacConnector(undefined, fetchMock as typeof fetch).refreshSession({
-      sessionCookies: stableCookies,
-      sessionKeepAliveFailures: 1,
-      protocol: "sinopac-mobile-app-json-v1"
-    });
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(requestCookies[0]).toContain("sinopac_cookie=stable-cookie");
-    expect(cookieValue(refreshed.sessionCookies, "sinopac_cookie")).toBe("stable-cookie");
-    expect(cookieValue(refreshed.candidateSessionCookies!, "sinopac_cookie")).toBe("refreshed-cookie");
-    expect(refreshed.sessionKeepAliveFailures).toBe(0);
-    expect(new Date(refreshed.sessionExpiresAt).getTime()).toBeGreaterThan(Date.now());
-  });
-
-  it("falls back to the stable session while refreshing a rejected candidate", async () => {
-    const stableCookies = JSON.stringify([
-      ...JSON.parse(sessionCookies),
-      { name: "sinopac_cookie", value: "stable-cookie", domain: "m.sinopac.com", path: "/" }
-    ]);
-    const candidateCookies = JSON.stringify([
-      ...JSON.parse(sessionCookies),
-      { name: "sinopac_cookie", value: "candidate-cookie", domain: "m.sinopac.com", path: "/" }
-    ]);
-    const requestCookies: string[] = [];
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const cookie = new Headers(init?.headers).get("cookie") ?? "";
-      requestCookies.push(cookie);
-      if (cookie.includes("candidate-cookie")) {
-        return new Response(JSON.stringify([{ Header: "TIMEOUT", Message: "您尚未登入網銀" }]));
-      }
-      return new Response(JSON.stringify(summaryPayload));
-    });
-
-    const refreshed = await createSinopacConnector(undefined, fetchMock as typeof fetch).refreshSession({
-      sessionCookies: stableCookies,
-      candidateSessionCookies: candidateCookies,
-      protocol: "sinopac-mobile-app-json-v1"
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(requestCookies[0]).toContain("candidate-cookie");
-    expect(requestCookies[1]).toContain("stable-cookie");
-    expect(cookieValue(refreshed.sessionCookies, "sinopac_cookie")).toBe("stable-cookie");
-  });
-
-  it("falls back to the known-good session when a candidate is rejected", async () => {
-    const stableCookies = JSON.stringify([
-      ...JSON.parse(sessionCookies),
-      { name: "sinopac_cookie", value: "stable-cookie", domain: "m.sinopac.com", path: "/" }
-    ]);
-    const candidateCookies = JSON.stringify([
-      ...JSON.parse(sessionCookies),
-      { name: "sinopac_cookie", value: "candidate-cookie", domain: "m.sinopac.com", path: "/" }
-    ]);
-    const requestCookies: string[] = [];
-    const requestUrls: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const cookie = new Headers(init?.headers).get("cookie") ?? "";
-      requestCookies.push(cookie);
-      requestUrls.push(String(input));
-      if (cookie.includes("sinopac_cookie=candidate-cookie")) {
-        return new Response(JSON.stringify([{ Header: "TIMEOUT", Message: "您尚未登入網銀" }]));
-      }
-      const stableCall = requestCookies.length - 1;
-      const payload = stableCall === 1 ? summaryPayload : stableCall === 2 ? billPayload : unbilledPayload;
-      return new Response(JSON.stringify(payload), {
+      requestCookies.push(new Headers(init?.headers).get("cookie") ?? "");
+      const call = requestCookies.length;
+      return new Response(JSON.stringify(payloadForUrl(String(input))), {
         status: 200,
-        headers: { "Set-Cookie": `sinopac_cookie=fallback-${stableCall}; Path=/; HttpOnly; Secure` }
+        headers: { "Set-Cookie": `sinopac_cookie=api-cookie-${call}; Path=/; HttpOnly; Secure` }
       });
     });
 
     const result = await createSinopacConnector(undefined, fetchMock as typeof fetch).sync({
-      sessionCookies: stableCookies,
-      candidateSessionCookies: candidateCookies,
+      userId: "A123456789",
+      sessionCookies: authCookies,
       protocol: "sinopac-mobile-app-json-v1"
     });
 
-    const cursor = JSON.parse(result.cursor ?? "{}") as {
-      sessionCookies: string;
-      candidateSessionCookies: string;
-    };
-    expect(requestCookies).toHaveLength(4);
-    expect(requestUrls.slice(0, 2)).toEqual([
-      "https://m.sinopac.com/ws/card/cardqry/ws_cardsum.ashx",
-      "https://m.sinopac.com/ws/card/cardqry/ws_cardsum.ashx"
-    ]);
-    expect(requestCookies[0]).toContain("sinopac_cookie=candidate-cookie");
-    expect(requestCookies[1]).toContain("sinopac_cookie=stable-cookie");
-    expect(cookieValue(cursor.sessionCookies, "sinopac_cookie")).toBe("stable-cookie");
-    expect(cookieValue(cursor.candidateSessionCookies, "sinopac_cookie")).toBe("fallback-3");
+    expect(requestCookies).toHaveLength(6);
+    expect(requestCookies.slice(0, 3).every((cookie) => cookie.includes("sinopac_cookie=browser-cookie"))).toBe(true);
+    expect(requestCookies[3]).toContain("sinopac_cookie=api-cookie-3");
+    expect(requestCookies[4]).toContain("sinopac_cookie=api-cookie-4");
+    expect(requestCookies[5]).toContain("sinopac_cookie=api-cookie-5");
+    expect(JSON.parse(result.cursor ?? "{}")).toMatchObject({
+      sessionCookies: authCookies,
+      protocol: "sinopac-mobile-app-json-v1"
+    });
   });
 
   it("fetches the remaining statement months advertised by the default response", async () => {
@@ -435,13 +369,14 @@ describe("sinopac App JSON parser", () => {
       const url = String(input);
       const payload = url.includes("ws_cardsum")
         ? mobileSummaryPayload
-        : url.includes("ws_nonbilling")
-          ? mobileUnbilledPayload
-          : mobileBillPayload;
+        : url.includes("ws_cardbilling_sp")
+          ? mobileBillPayload
+          : payloadForUrl(url);
       return new Response(JSON.stringify(payload), { status: 200 });
     });
 
     await createSinopacConnector(undefined, fetchMock as typeof fetch).sync({
+      userId: "A123456789",
       sessionCookies,
       protocol: "sinopac-mobile-app-json-v1",
       lookbackMonths: 3
@@ -452,7 +387,10 @@ describe("sinopac App JSON parser", () => {
       "https://m.sinopac.com/ws/card/cardqry/ws_cardbilling_sp.ashx?TxDate=default&TxType=01",
       "https://m.sinopac.com/ws/card/cardqry/ws_cardbilling_sp.ashx?TxDate=202605&TxType=01",
       "https://m.sinopac.com/ws/card/cardqry/ws_cardbilling_sp.ashx?TxDate=202604&TxType=01",
-      "https://m.sinopac.com/ws/card/cardqry/ws_nonbilling.ashx"
+      "https://m.sinopac.com/m/SinoCard/api/security/sso",
+      "https://m.sinopac.com/m/SinoCard/api/security/auth",
+      "https://m.sinopac.com/m/SinoCard/api/Accounting/LatestTx",
+      "https://m.sinopac.com/m/SinoCard/api/Accounting/OutstandingDetail"
     ]);
   });
 
@@ -463,36 +401,11 @@ describe("sinopac App JSON parser", () => {
     }])));
 
     await expect(createSinopacConnector(undefined, fetchMock as typeof fetch).sync({
+      userId: "A123456789",
       sessionCookies,
       protocol: "sinopac-mobile-app-json-v1"
     })).rejects.toBeInstanceOf(SinopacVerificationRequiredError);
     expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  it("requests verification only after both candidate and stable sessions are rejected", async () => {
-    const requestUrls: string[] = [];
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      requestUrls.push(String(input));
-      return new Response(JSON.stringify([{
-        Header: "TIMEOUT",
-        Message: "您尚未登入網銀"
-      }]));
-    });
-
-    await expect(createSinopacConnector(undefined, fetchMock as typeof fetch).sync({
-      sessionCookies,
-      candidateSessionCookies: JSON.stringify([{
-        name: "ASP.NET_SessionId",
-        value: "candidate-session",
-        domain: "m.sinopac.com"
-      }]),
-      protocol: "sinopac-mobile-app-json-v1"
-    })).rejects.toBeInstanceOf(SinopacVerificationRequiredError);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(requestUrls).toEqual([
-      "https://m.sinopac.com/ws/card/cardqry/ws_cardsum.ashx",
-      "https://m.sinopac.com/ws/card/cardqry/ws_cardsum.ashx"
-    ]);
   });
 
   it("does not reuse a legacy MMA session after switching protocols", async () => {

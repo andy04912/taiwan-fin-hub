@@ -1,4 +1,4 @@
-import puppeteer, { type Browser, type Page } from "@cloudflare/puppeteer";
+import puppeteer, { type Browser, type Dialog, type Page } from "@cloudflare/puppeteer";
 import { decode as decodeJpeg } from "jpeg-js";
 import type {
   BankAccount,
@@ -13,11 +13,14 @@ const MOBILE_HOST = "https://m.sinopac.com";
 const LOGIN_URL = `${MOBILE_HOST}/m/member/login/m_login.aspx?RequestTrans=MobileCard`;
 const CARD_SUMMARY_PATH = "/ws/card/cardqry/ws_cardsum.ashx";
 const CARD_BILLS_PATH = "/ws/card/cardqry/ws_cardbilling_sp.ashx";
-const CARD_UNBILLED_PATH = "/ws/card/cardqry/ws_nonbilling.ashx";
-const SESSION_PROTOCOL = "sinopac-mobile-app-json-v1";
+const CARD_SSO_PATH = "/m/SinoCard/api/security/sso";
+const CARD_AUTH_PATH = "/m/SinoCard/api/security/auth";
+const CARD_LATEST_TX_PATH = "/m/SinoCard/api/Accounting/LatestTx";
+const CARD_OUTSTANDING_DETAIL_PATH = "/m/SinoCard/api/Accounting/OutstandingDetail";
+export const SINOPAC_SESSION_PROTOCOL = "sinopac-mobile-app-json-v1";
+export const SINOPAC_AUTO_LOGIN_ATTEMPTS = 3;
 const CAPTCHA_BROWSER_KEEP_ALIVE_MS = 150_000;
 const CAPTCHA_VALIDITY_MS = 120_000;
-const SESSION_VALIDITY_MS = 20 * 60 * 1000;
 const ANDROID_USER_AGENT =
   "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UP1A.231105.003) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
@@ -27,7 +30,9 @@ type FetchImpl = typeof fetch;
 type SinopacApiPayloads = {
   summary: unknown;
   bills: unknown;
-  unbilled: unknown;
+  latest?: unknown;
+  outstanding?: unknown;
+  unbilled?: unknown;
 };
 type Scraped = {
   bankAccounts: Array<Omit<BankAccount, "id" | "connectorId">>;
@@ -43,8 +48,25 @@ export class SinopacVerificationRequiredError extends Error {
   }
 }
 
+export class SinopacCaptchaRejectedError extends SinopacVerificationRequiredError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SinopacCaptchaRejectedError";
+  }
+}
+
+export class SinopacCredentialRejectedError extends SinopacVerificationRequiredError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SinopacCredentialRejectedError";
+  }
+}
+
 export class SinopacBrowserCapacityError extends Error {
-  constructor(message: string, readonly retryAfterSeconds = 20) {
+  constructor(
+    message: string,
+    readonly retryAfterSeconds = 20
+  ) {
     super(message);
     this.name = "SinopacBrowserCapacityError";
   }
@@ -87,143 +109,68 @@ export function createSinopacConnector(browser?: Fetcher, fetchImpl: FetchImpl =
       if (!sessionCookies) {
         throw new SinopacVerificationRequiredError("永豐同步需要先完成一次圖形驗證。");
       }
-      if (!verifiedThisRun && config.protocol !== SESSION_PROTOCOL) {
+      if (!verifiedThisRun && config.protocol !== SINOPAC_SESSION_PROTOCOL) {
         throw new SinopacVerificationRequiredError("永豐連接器已改用行動銀行 App JSON API，請重新完成一次圖形驗證。");
       }
 
       const lookbackMonths = config.lookbackMonths ?? 3;
-      const sessionAttempts = !verifiedThisRun
-        && config.candidateSessionCookies
-        && config.candidateSessionCookies !== sessionCookies
-        ? [
-            { source: "candidate" as const, cookies: config.candidateSessionCookies },
-            { source: "stable" as const, cookies: sessionCookies }
-          ]
-        : [{ source: "stable" as const, cookies: sessionCookies }];
-      let cards: Scraped | undefined;
-      let stableSessionCookies = sessionCookies;
-      let candidateSessionCookies: string | undefined;
-
-      for (const [index, attempt] of sessionAttempts.entries()) {
-        try {
-          const client = new SinopacAppClient(attempt.cookies, fetchImpl);
-          const canarySummary = attempt.source === "candidate"
-            ? await client.fetchSummary()
-            : undefined;
-          const payloads = await client.fetchCreditCards(lookbackMonths, canarySummary);
-          cards = parseSinopacCardData(payloads, lookbackMonths);
-          stableSessionCookies = attempt.cookies;
-          const rotatedCookies = client.serializedCookies();
-          candidateSessionCookies = rotatedCookies === attempt.cookies ? undefined : rotatedCookies;
-          if (attempt.source === "candidate") {
-            console.log("[sinopac] promoted candidate session after a successful cross-run canary");
-          } else if (index > 0) {
-            console.log("[sinopac] retained the known-good session after candidate rejection");
-          }
-          break;
-        } catch (error) {
-          const canFallback =
-            error instanceof SinopacVerificationRequiredError
-            && attempt.source === "candidate"
-            && index + 1 < sessionAttempts.length;
-          if (!canFallback) throw error;
-          console.warn("[sinopac] candidate session rejected; retrying the known-good session");
-        }
+      if (!config.userId) {
+        throw new SinopacVerificationRequiredError("永豐最新消費同步需要重新登入以取得身分識別資料。");
       }
-      if (!cards) {
-        throw new SinopacVerificationRequiredError("永豐銀行 session 已失效，請重新完成圖形驗證。");
-      }
+      const client = new SinopacAppClient(sessionCookies, config.userId, fetchImpl);
+      const payloads = await client.fetchCreditCards(lookbackMonths);
+      const cards = parseSinopacCardData(payloads, lookbackMonths);
       const now = new Date();
 
       return {
         records: [],
         ...cards,
         cursor: JSON.stringify({
-          sessionCookies: stableSessionCookies,
-          candidateSessionCookies,
-          candidateSessionCreatedAt: candidateSessionCookies ? now.toISOString() : undefined,
-          sessionExpiresAt: new Date(now.getTime() + SESSION_VALIDITY_MS).toISOString(),
-          sessionKeepAliveFailures: 0,
-          protocol: SESSION_PROTOCOL,
+          sessionCookies,
+          protocol: SINOPAC_SESSION_PROTOCOL,
           syncedAt: now.toISOString()
         })
       };
-    },
-
-    async refreshSession(config: SinopacConfig) {
-      if (!config.sessionCookies || config.protocol !== SESSION_PROTOCOL) {
-        throw new SinopacVerificationRequiredError("永豐同步需要先完成一次圖形驗證。");
-      }
-
-      const attempts = config.candidateSessionCookies
-        && config.candidateSessionCookies !== config.sessionCookies
-        ? [
-            { source: "candidate" as const, cookies: config.candidateSessionCookies },
-            { source: "stable" as const, cookies: config.sessionCookies }
-          ]
-        : [{ source: "stable" as const, cookies: config.sessionCookies }];
-
-      for (const [index, attempt] of attempts.entries()) {
-        try {
-          const client = new SinopacAppClient(attempt.cookies, fetchImpl);
-          await client.fetchSummary();
-          const now = new Date();
-          const rotatedCookies = client.serializedCookies();
-          return {
-            sessionCookies: attempt.cookies,
-            candidateSessionCookies: rotatedCookies === attempt.cookies ? undefined : rotatedCookies,
-            candidateSessionCreatedAt: rotatedCookies === attempt.cookies ? undefined : now.toISOString(),
-            sessionExpiresAt: new Date(now.getTime() + SESSION_VALIDITY_MS).toISOString(),
-            sessionKeepAliveFailures: 0,
-            protocol: SESSION_PROTOCOL
-          };
-        } catch (error) {
-          const canFallback =
-            error instanceof SinopacVerificationRequiredError
-            && attempt.source === "candidate"
-            && index + 1 < attempts.length;
-          if (!canFallback) throw error;
-          console.warn("[sinopac] keep-alive candidate rejected; retrying the known-good session");
-        }
-      }
-
-      throw new SinopacVerificationRequiredError("永豐銀行 session 已失效，請重新完成圖形驗證。");
     }
   };
 }
 
 class SinopacAppClient {
-  private readonly cookies: SinopacCookieJar;
+  private readonly cookieHeader: string;
+  private readonly sinoCardCookies: Map<string, string>;
 
   constructor(
     serializedCookies: string,
+    private readonly userId: string,
     private readonly fetchImpl: FetchImpl
   ) {
-    this.cookies = new SinopacCookieJar(serializedCookies);
-  }
-
-  serializedCookies() {
-    return this.cookies.serialize();
+    this.cookieHeader = cookieHeaderFromSerialized(serializedCookies);
+    this.sinoCardCookies = cookieMapFromHeader(this.cookieHeader);
   }
 
   fetchSummary() {
     return this.post(CARD_SUMMARY_PATH, "信用卡總覽");
   }
 
-  async fetchCreditCards(
-    lookbackMonths: number,
-    canarySummary?: unknown
-  ): Promise<SinopacApiPayloads> {
-    const summary = canarySummary ?? await this.fetchSummary();
+  async fetchCreditCards(lookbackMonths: number): Promise<SinopacApiPayloads> {
+    const summary = await this.fetchSummary();
     const initialBills = await this.post(`${CARD_BILLS_PATH}?TxDate=default&TxType=01`, "近期帳單");
-    const billMonths = extractAdvertisedBillMonths(initialBills)
-      .slice(1, Math.max(1, Math.min(3, lookbackMonths)));
+    const billMonths = extractAdvertisedBillMonths(initialBills).slice(1, Math.max(1, Math.min(3, lookbackMonths)));
     const olderBills = [];
     for (const month of billMonths) {
       olderBills.push(await this.post(`${CARD_BILLS_PATH}?TxDate=${month}&TxType=01`, `${month} 帳單`));
     }
-    const unbilled = await this.post(CARD_UNBILLED_PATH, "未出帳明細");
-    return { summary, bills: [initialBills, ...olderBills], unbilled };
+    const sso = await this.postSinoCard(CARD_SSO_PATH, "信用卡單一登入", {});
+    const customerId = sinoCardCustomerId(sso) ?? this.userId;
+    await this.postSinoCard(CARD_AUTH_PATH, "信用卡授權", {}, customerId);
+    const latest = await this.postSinoCard(CARD_LATEST_TX_PATH, "最新消費", { ID: customerId }, customerId);
+    const outstanding = await this.postSinoCard(
+      CARD_OUTSTANDING_DETAIL_PATH,
+      "已請款消費明細",
+      { IsExcludePaidUp: false, ID: customerId, DateYYYYMMDD: "" },
+      customerId
+    );
+    return { summary, bills: [initialBills, ...olderBills], latest, outstanding };
   }
 
   private async post(path: string, label: string) {
@@ -232,14 +179,13 @@ class SinopacAppClient {
       headers: {
         Accept: "application/json, text/plain, */*",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        Cookie: this.cookies.header(),
+        Cookie: this.cookieHeader,
         Referer: `${MOBILE_HOST}/m/m_home.aspx`,
         "User-Agent": ANDROID_USER_AGENT,
         "X-Requested-With": "XMLHttpRequest"
       },
       body: ""
     });
-    this.cookies.updateFromResponse(response.headers);
     const text = await response.text();
     if (!response.ok) {
       throw new Error(`永豐${label} API 回應 HTTP ${response.status}。`);
@@ -257,6 +203,45 @@ class SinopacAppClient {
     assertSinopacApiSuccess(payload, label);
     return payload;
   }
+
+  private async postSinoCard(path: string, label: string, content: JsonRecord, userId = this.userId) {
+    const response = await this.fetchImpl.call(globalThis, `${MOBILE_HOST}${path}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        Cookie: cookieHeaderFromMap(this.sinoCardCookies),
+        Referer: `${MOBILE_HOST}/m/SinoCard/Account/UnbilledTxInquiry`,
+        "User-Agent": ANDROID_USER_AGENT
+      },
+      body: JSON.stringify({
+        Content: content,
+        Header: {
+          ApplicationName: "MWEB",
+          UserID: userId,
+          ClientRefNo: crypto.randomUUID().replaceAll("-", ""),
+          ClientTimestamp: new Date().toISOString()
+        }
+      })
+    });
+    storeSetCookies(this.sinoCardCookies, response.headers);
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`永豐${label} API 回應 HTTP ${response.status}。`);
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      if (/m_login|尚未登入|登入\/Login/i.test(text)) {
+        throw new SinopacVerificationRequiredError("永豐銀行 session 已失效，請重新完成圖形驗證。");
+      }
+      throw new Error(`永豐${label} API 回應不是有效 JSON。`);
+    }
+    assertSinoCardApiSuccess(payload, label);
+    return payload;
+  }
 }
 
 export async function prepareSinopacCaptcha(browser: Fetcher | undefined, config: SinopacConfig) {
@@ -267,29 +252,15 @@ export async function prepareSinopacCaptcha(browser: Fetcher | undefined, config
 
   const browserInstance = await getCaptchaBrowser(browser, config.browserSessionId);
   const pages = await browserInstance.pages();
-  const page = pages.find((candidate) => candidate.url().includes("/m/member/login/m_login.aspx"))
-    ?? pages[0]
-    ?? await browserInstance.newPage();
+  const page =
+    pages.find((candidate) => candidate.url().includes("/m/member/login/m_login.aspx")) ??
+    pages[0] ??
+    (await browserInstance.newPage());
   let preserved = false;
   try {
     await configurePage(page);
-    let bytes: Uint8Array | string | undefined;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await openLoginAndFill(page, config);
-      await page.waitForFunction(() => {
-        const image = document.querySelector<HTMLImageElement>('img[name="imgCode"]');
-        return Boolean(image?.complete && image.naturalWidth > 0);
-      }, { timeout: 10_000 });
-      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 400));
-      const image = await page.$('img[name="imgCode"]');
-      if (!image) throw new Error("永豐行動網銀登入頁沒有取得圖形驗證碼。");
-      const candidate = await image.screenshot({ type: "jpeg" });
-      if (captchaHasVisibleDigits(candidate)) {
-        bytes = candidate;
-        break;
-      }
-    }
-    if (!bytes) throw new Error("永豐圖形驗證碼影像為空白，請稍後再試。");
+    await openLoginAndFill(page, config);
+    const bytes = await captureSinopacCaptcha(page);
     const sessionId = browserInstance.sessionId();
     await browserInstance.disconnect();
     preserved = true;
@@ -301,6 +272,75 @@ export async function prepareSinopacCaptcha(browser: Fetcher | undefined, config
   } finally {
     if (!preserved) await browserInstance.close();
   }
+}
+
+export async function loginSinopacWithOcr(
+  browser: Fetcher | undefined,
+  config: SinopacConfig,
+  recognizeCaptcha: (imageBytes: ArrayBuffer) => Promise<string>
+): Promise<{
+  sessionCookies: string;
+  protocol: typeof SINOPAC_SESSION_PROTOCOL;
+}> {
+  if (!config.userId || !config.account || !config.password) {
+    throw new SinopacVerificationRequiredError("請先儲存永豐身分證字號／統編、使用者代碼與網路密碼。");
+  }
+  if (!browser) throw new Error("永豐自動驗證需要 BROWSER binding。");
+
+  const browserInstance = await getCaptchaBrowser(browser, config.browserSessionId);
+  const pages = await browserInstance.pages();
+  const page =
+    pages.find((candidate) => candidate.url().includes("/m/member/login/m_login.aspx")) ??
+    pages[0] ??
+    (await browserInstance.newPage());
+  try {
+    await configurePage(page);
+    for (let attempt = 1; attempt <= SINOPAC_AUTO_LOGIN_ATTEMPTS; attempt += 1) {
+      try {
+        await openLoginAndFill(page, config);
+        const imageBytes = await captureSinopacCaptcha(page);
+        const captcha = await recognizeCaptcha(toArrayBuffer(imageBytes));
+        if (!/^\d{6}$/.test(captcha)) {
+          throw new Error("Gemma 4 未回傳六位數字。");
+        }
+        await submitLogin(page, captcha);
+        return {
+          sessionCookies: JSON.stringify(await page.cookies()),
+          protocol: SINOPAC_SESSION_PROTOCOL
+        };
+      } catch (error) {
+        if (error instanceof SinopacCredentialRejectedError) throw error;
+      }
+    }
+    throw new SinopacVerificationRequiredError(
+      `永豐自動驗證連續失敗 ${SINOPAC_AUTO_LOGIN_ATTEMPTS} 次，請改用人工驗證。`
+    );
+  } finally {
+    await browserInstance.close();
+  }
+}
+
+async function captureSinopacCaptcha(page: Page) {
+  let bytes: Uint8Array | string | undefined;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.waitForFunction(
+      () => {
+        const image = document.querySelector<HTMLImageElement>('img[name="imgCode"]');
+        return Boolean(image?.complete && image.naturalWidth > 0);
+      },
+      { timeout: 10_000 }
+    );
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 400));
+    const image = await page.$('img[name="imgCode"]');
+    if (!image) throw new Error("永豐行動網銀登入頁沒有取得圖形驗證碼。");
+    const candidate = await image.screenshot({ type: "jpeg" });
+    if (captchaHasVisibleDigits(candidate)) {
+      bytes = candidate;
+      break;
+    }
+  }
+  if (!bytes) throw new Error("永豐圖形驗證碼影像為空白，請稍後再試。");
+  return bytes;
 }
 
 async function getCaptchaBrowser(browser: Fetcher, preferredSessionId?: string) {
@@ -348,7 +388,10 @@ async function configurePage(page: Page) {
 }
 
 async function openLoginAndFill(page: Page, config: SinopacConfig) {
-  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 20_000 });
+  await page.goto(LOGIN_URL, {
+    waitUntil: "domcontentloaded",
+    timeout: 20_000
+  });
   const userIdSelector = 'input[placeholder="ID"], input[placeholder*="身分證"]';
   const accountSelector = 'input[placeholder="User Code"], input[placeholder*="使用者"]';
   const passwordSelector = 'input[placeholder="Password"], input[placeholder*="密碼"]';
@@ -366,31 +409,57 @@ async function submitLogin(page: Page, captcha: string) {
     await page.type("#CheckValidateNumber", captcha);
     stage = "送出登入";
     let resolveDialog: (() => void) | undefined;
-    const dialogSignal = new Promise<void>((resolve) => { resolveDialog = resolve; });
-    page.once("dialog", async (dialog) => {
+    const dialogSignal = new Promise<void>((resolve) => {
+      resolveDialog = resolve;
+    });
+    const onDialog = async (dialog: Dialog) => {
       dialogMessage = dialog.message();
       dialogType = dialog.type();
       await dialog.accept();
       resolveDialog?.();
-    });
+    };
+    page.once("dialog", onDialog);
     const navigation = page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => null);
-    const loginStateChanged = page.waitForFunction(() => {
-      const form = document.querySelector<HTMLElement>("form#m_login");
-      const visible = form && getComputedStyle(form).display !== "none" && getComputedStyle(form).visibility !== "hidden";
-      return !visible || /驗證碼錯誤|驗證碼有誤|密碼錯誤|登入失敗|使用者代碼錯誤/.test(document.body.innerText);
-    }, { timeout: 20_000 }).catch(() => null);
+    const loginStateChanged = page
+      .waitForFunction(
+        () => {
+          const form = document.querySelector<HTMLElement>("form#m_login");
+          const visible =
+            form && getComputedStyle(form).display !== "none" && getComputedStyle(form).visibility !== "hidden";
+          return !visible || /驗證碼(?:錯誤|有誤)|密碼(?:錯誤|有誤)|登入失敗|使用者代(?:碼|號)(?:錯誤|有誤)/.test(document.body.innerText);
+        },
+        { timeout: 20_000 }
+      )
+      .catch(() => null);
     await page.click("#MMA_Login");
-    await Promise.race([navigation, loginStateChanged, dialogSignal]);
-    if (dialogType === "confirm") await Promise.race([navigation, loginStateChanged]);
+    try {
+      await Promise.race([navigation, loginStateChanged, dialogSignal]);
+      if (dialogType === "confirm") await Promise.race([navigation, loginStateChanged]);
+    } finally {
+      page.off("dialog", onDialog);
+    }
 
     stage = "確認登入結果";
-    await page.waitForFunction(() => document.readyState !== "loading", { timeout: 8_000 }).catch(() => undefined);
+    await page
+      .waitForFunction(() => document.readyState !== "loading", {
+        timeout: 8_000
+      })
+      .catch(() => undefined);
     if (await needsMobileLogin(page)) {
-      const message = await page.evaluate(() => {
-        const text = document.body.innerText.replace(/\s+/g, " ").trim();
-        return text.match(/.{0,40}(?:驗證碼錯誤|驗證碼有誤|密碼錯誤|登入失敗|使用者代碼錯誤).{0,100}/)?.[0] ?? "";
-      }).catch(() => "");
-      throw new SinopacVerificationRequiredError(`永豐銀行登入失敗：${dialogMessage || message || "請確認帳密或驗證碼"}`);
+      const message = await page
+        .evaluate(() => {
+          const text = document.body.innerText.replace(/\s+/g, " ").trim();
+          return text.match(/.{0,40}(?:驗證碼(?:錯誤|有誤)|密碼(?:錯誤|有誤)|登入失敗|使用者代(?:碼|號)(?:錯誤|有誤)).{0,100}/)?.[0] ?? "";
+        })
+        .catch(() => "");
+      const detail = dialogMessage || message;
+      if (/驗證碼錯誤|驗證碼有誤/.test(detail)) {
+        throw new SinopacCaptchaRejectedError(`永豐銀行登入失敗：${detail}`);
+      }
+      if (/密碼.*(?:錯誤|有誤)|使用者代(?:碼|號).*(?:錯誤|有誤)|帳號.*(?:錯誤|有誤)|身分證.*(?:錯誤|有誤)/.test(detail)) {
+        throw new SinopacCredentialRejectedError(`永豐銀行登入失敗：${detail}`);
+      }
+      throw new SinopacVerificationRequiredError(`永豐銀行登入失敗：${detail || "請確認帳密或驗證碼"}`);
     }
   } catch (error) {
     if (error instanceof SinopacVerificationRequiredError) throw error;
@@ -416,6 +485,15 @@ function bytesToBase64(bytes: Uint8Array | string) {
   return btoa(binary);
 }
 
+function toArrayBuffer(bytes: Uint8Array | string) {
+  if (typeof bytes !== "string")
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const binary = atob(bytes);
+  const decoded = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) decoded[index] = binary.charCodeAt(index);
+  return decoded.buffer;
+}
+
 function captchaHasVisibleDigits(bytes: Uint8Array | string) {
   if (typeof bytes === "string") return bytes.length > 100;
   try {
@@ -424,9 +502,10 @@ function captchaHasVisibleDigits(bytes: Uint8Array | string) {
     if (pixels === 0) return false;
     let darkPixels = 0;
     for (let offset = 0; offset < decoded.data.length; offset += 4) {
-      const luminance = 0.299 * (decoded.data[offset] ?? 255)
-        + 0.587 * (decoded.data[offset + 1] ?? 255)
-        + 0.114 * (decoded.data[offset + 2] ?? 255);
+      const luminance =
+        0.299 * (decoded.data[offset] ?? 255) +
+        0.587 * (decoded.data[offset + 1] ?? 255) +
+        0.114 * (decoded.data[offset + 2] ?? 255);
       if (luminance < 170) darkPixels += 1;
     }
     return darkPixels / pixels >= 0.12;
@@ -435,110 +514,73 @@ function captchaHasVisibleDigits(bytes: Uint8Array | string) {
   }
 }
 
-class SinopacCookieJar {
-  private readonly cookies = new Map<string, JsonRecord>();
-
-  constructor(serialized: string) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(serialized);
-    } catch {
-      throw new SinopacVerificationRequiredError("永豐銀行 session 格式無效，請重新完成圖形驗證。");
-    }
-    if (!Array.isArray(parsed)) {
-      throw new SinopacVerificationRequiredError("永豐銀行 session 格式無效，請重新完成圖形驗證。");
-    }
-    for (const cookie of parsed) {
-      if (!isRecord(cookie) || !isSinopacCookie(cookie)) continue;
+function cookieHeaderFromSerialized(serialized: string) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    throw new SinopacVerificationRequiredError("永豐銀行 session 格式無效，請重新完成圖形驗證。");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new SinopacVerificationRequiredError("永豐銀行 session 格式無效，請重新完成圖形驗證。");
+  }
+  const nowSeconds = Date.now() / 1000;
+  const header = parsed
+    .filter((cookie): cookie is JsonRecord => isRecord(cookie))
+    .filter((cookie) => {
+      const domain = stringValue(cookie.domain).replace(/^\./, "").toLowerCase();
+      if (domain && domain !== "sinopac.com" && !domain.endsWith(".sinopac.com")) return false;
+      const expires =
+        typeof cookie.expires === "number" && Number.isFinite(cookie.expires) ? cookie.expires : undefined;
+      return expires == null || expires <= 0 || expires > nowSeconds;
+    })
+    .map((cookie) => {
       const name = stringValue(cookie.name);
       const value = stringValue(cookie.value);
-      if (name && value) this.cookies.set(cookieKey(cookie), cookie);
-    }
-    if (this.cookies.size === 0) {
-      throw new SinopacVerificationRequiredError("永豐銀行 session 沒有可用 Cookie，請重新完成圖形驗證。");
-    }
+      return name && value ? `${name}=${value}` : "";
+    })
+    .filter(Boolean)
+    .join("; ");
+  if (!header) {
+    throw new SinopacVerificationRequiredError("永豐銀行 session 沒有可用 Cookie，請重新完成圖形驗證。");
   }
+  return header;
+}
 
-  header() {
-    const nowSeconds = Date.now() / 1000;
-    return Array.from(this.cookies.values())
-      .filter((cookie) => {
-        const expires = numberValue(cookie.expires);
-        return expires == null || expires <= 0 || expires > nowSeconds;
-      })
-      .sort((left, right) => stringValue(right.path).length - stringValue(left.path).length)
-      .map((cookie) => `${stringValue(cookie.name)}=${stringValue(cookie.value)}`)
-      .join("; ");
-  }
+function cookieMapFromHeader(header: string) {
+  return new Map(
+    header.split(";").flatMap((part) => {
+      const separator = part.indexOf("=");
+      if (separator <= 0) return [];
+      const name = part.slice(0, separator).trim();
+      const value = part.slice(separator + 1).trim();
+      return name && value ? [[name, value] as const] : [];
+    })
+  );
+}
 
-  updateFromResponse(headers: Headers) {
-    for (const value of readSetCookieHeaders(headers)) {
-      const cookie = parseSetCookie(value);
-      if (!cookie) continue;
-      const key = cookieKey(cookie);
-      const expires = numberValue(cookie.expires);
-      if (!stringValue(cookie.value) || (expires != null && expires > 0 && expires <= Date.now() / 1000)) {
-        this.cookies.delete(key);
-      } else {
-        this.cookies.set(key, cookie);
-      }
-    }
-  }
+function cookieHeaderFromMap(cookies: Map<string, string>) {
+  return Array.from(cookies, ([name, value]) => `${name}=${value}`).join("; ");
+}
 
-  serialize() {
-    return JSON.stringify(Array.from(this.cookies.values()));
+function storeSetCookies(cookies: Map<string, string>, headers: Headers) {
+  const withGetter = headers as Headers & { getSetCookie?: () => string[] };
+  const values = typeof withGetter.getSetCookie === "function"
+    ? withGetter.getSetCookie()
+    : splitCombinedSetCookie(headers.get("set-cookie") ?? "");
+  for (const value of values) {
+    const [pair] = value.split(";");
+    const separator = pair.indexOf("=");
+    if (separator <= 0) continue;
+    const name = pair.slice(0, separator).trim();
+    const cookieValue = pair.slice(separator + 1).trim();
+    if (cookieValue) cookies.set(name, cookieValue);
+    else cookies.delete(name);
   }
 }
 
-function isSinopacCookie(cookie: JsonRecord) {
-  const domain = stringValue(cookie.domain).replace(/^\./, "").toLowerCase();
-  return !domain || domain === "sinopac.com" || domain.endsWith(".sinopac.com");
-}
-
-function cookieKey(cookie: JsonRecord) {
-  const domain = stringValue(cookie.domain).replace(/^\./, "").toLowerCase() || "m.sinopac.com";
-  const path = stringValue(cookie.path) || "/";
-  return `${domain}\t${path}\t${stringValue(cookie.name)}`;
-}
-
-function readSetCookieHeaders(headers: Headers) {
-  const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
-  const values = typeof getSetCookie === "function" ? getSetCookie.call(headers) : [];
-  if (values.length > 0) return values;
-  const combined = headers.get("set-cookie");
-  return combined ? combined.split(/,(?=\s*[^=;,\s]+=)/g) : [];
-}
-
-function parseSetCookie(value: string): JsonRecord | undefined {
-  const parts = value.split(";").map((part) => part.trim());
-  const first = parts.shift();
-  if (!first) return undefined;
-  const separator = first.indexOf("=");
-  if (separator <= 0) return undefined;
-  const cookie: JsonRecord = {
-    name: first.slice(0, separator).trim(),
-    value: first.slice(separator + 1),
-    domain: "m.sinopac.com",
-    path: "/"
-  };
-  let maxAge: number | undefined;
-  for (const attribute of parts) {
-    const attributeSeparator = attribute.indexOf("=");
-    const rawName = (attributeSeparator < 0 ? attribute : attribute.slice(0, attributeSeparator)).trim().toLowerCase();
-    const rawValue = attributeSeparator < 0 ? "" : attribute.slice(attributeSeparator + 1).trim();
-    if (rawName === "domain" && rawValue) cookie.domain = rawValue.replace(/^\./, "").toLowerCase();
-    else if (rawName === "path" && rawValue) cookie.path = rawValue;
-    else if (rawName === "secure") cookie.secure = true;
-    else if (rawName === "httponly") cookie.httpOnly = true;
-    else if (rawName === "samesite" && rawValue) cookie.sameSite = rawValue;
-    else if (rawName === "max-age") maxAge = Number.parseInt(rawValue, 10);
-    else if (rawName === "expires") {
-      const expiresAt = Date.parse(rawValue);
-      if (Number.isFinite(expiresAt)) cookie.expires = expiresAt / 1000;
-    }
-  }
-  if (maxAge != null && Number.isFinite(maxAge)) cookie.expires = Date.now() / 1000 + maxAge;
-  return cookie;
+function splitCombinedSetCookie(value: string) {
+  return value ? value.split(/,(?=\s*[^;,=]+=[^;,]+)/g).map((cookie) => cookie.trim()).filter(Boolean) : [];
 }
 
 function assertSinopacApiSuccess(payload: unknown, label: string) {
@@ -552,29 +594,47 @@ function assertSinopacApiSuccess(payload: unknown, label: string) {
   if (header !== "SUCCESS") throw new Error(`永豐${label} API 失敗：${message}`);
 }
 
-export function parseSinopacCardData(
-  payloads: SinopacApiPayloads,
-  lookbackMonths: number,
-  now = new Date()
-): Scraped {
+function assertSinoCardApiSuccess(payload: unknown, label: string) {
+  if (!isRecord(payload)) throw new Error(`永豐${label} API 回應格式無效。`);
+  const resultCode = stringValue(payload.ResultCode);
+  const message = stringValue(payload.ResultMessage) || stringValue(payload.Error) || "銀行未提供錯誤訊息";
+  if (resultCode === "00") return;
+  if (/尚未登入|登入|逾時|session|授權|驗證/i.test(message) || /單一登入|信用卡授權/.test(label)) {
+    throw new SinopacVerificationRequiredError("永豐銀行 session 已失效，請重新完成圖形驗證。");
+  }
+  throw new Error(`永豐${label} API 失敗：${message}`);
+}
+
+function sinoCardCustomerId(payload: unknown) {
+  if (!isRecord(payload) || !isRecord(payload.Result)) return undefined;
+  return stringValue(payload.Result.ID) || undefined;
+}
+
+export function parseSinopacCardData(payloads: SinopacApiPayloads, lookbackMonths: number, now = new Date()): Scraped {
   const summary = parseSummary(payloads.summary);
   const bills = parseBills(payloads.bills, lookbackMonths, now);
-  const transactions = parseTransactions(payloads.unbilled);
+  const transactions = payloads.outstanding != null || payloads.latest != null
+    ? parseSinoCardTransactions(payloads.latest, payloads.outstanding)
+    : parseTransactions(payloads.unbilled);
   const latestTwdBill = bills
     .filter((bill) => bill.currency === "TWD")
     .sort((left, right) => right.billingPeriod.localeCompare(left.billingPeriod))[0];
   if (
-    latestTwdBill
-    && latestTwdBill.statementAmount != null
-    && summary.recentPaymentAmount != null
-    && summary.recentPaymentDate
-    && summary.recentPaymentAmount >= latestTwdBill.statementAmount
-    && (!latestTwdBill.statementClosingDate || summary.recentPaymentDate >= latestTwdBill.statementClosingDate)
+    latestTwdBill &&
+    latestTwdBill.statementAmount != null &&
+    summary.recentPaymentAmount != null &&
+    summary.recentPaymentDate &&
+    summary.recentPaymentAmount >= latestTwdBill.statementAmount &&
+    (!latestTwdBill.statementClosingDate || summary.recentPaymentDate >= latestTwdBill.statementClosingDate)
   ) {
     latestTwdBill.paidAmount = summary.recentPaymentAmount;
     latestTwdBill.isPaid = true;
   }
-  const currencies = new Set(["TWD", ...bills.map((bill) => bill.currency), ...transactions.map((item) => item.currency)]);
+  const currencies = new Set([
+    "TWD",
+    ...bills.map((bill) => bill.currency),
+    ...transactions.map((item) => item.currency)
+  ]);
 
   const bankAccounts: Scraped["bankAccounts"] = Array.from(currencies).map((currency) => {
     const sourceId = accountIdForCurrency(currency);
@@ -589,7 +649,7 @@ export function parseSinopacCardData(
       creditLimit: currency === "TWD" ? summary.creditLimit : undefined,
       raw: {
         provider: "sinopac.mobile-app-json",
-        protocol: SESSION_PROTOCOL,
+        protocol: SINOPAC_SESSION_PROTOCOL,
         currency,
         cardLast4: currency === "TWD" ? summary.cardLast4 : undefined
       }
@@ -602,10 +662,10 @@ export function parseSinopacCardData(
   const statementClosingDate = summary.statementClosingDate ?? latestTwdBill?.statementClosingDate;
   const bankBalanceSnapshots: Scraped["bankBalanceSnapshots"] = [];
   if (
-    statementAmount != null
-    || summary.availableCredit != null
-    || summary.creditLimit != null
-    || summary.noPaymentNeeded
+    statementAmount != null ||
+    summary.availableCredit != null ||
+    summary.creditLimit != null ||
+    summary.noPaymentNeeded
   ) {
     const accountId = accountIdForCurrency("TWD");
     bankBalanceSnapshots.push({
@@ -678,13 +738,14 @@ function parseBills(payload: unknown, lookbackMonths: number, now: Date) {
       billingPeriod: period,
       statementAmount: Math.abs(statementAmount),
       minimumPayment: absoluteOrUndefined(findRecordAmount(record, /最低應繳|最低繳款|minimum\s*payment/i)),
-      isPaid: paymentStatus == null
-        ? undefined
-        : /已繳|繳清|無需繳|免繳/.test(paymentStatus)
-          ? true
-          : /未繳|待繳/.test(paymentStatus)
-            ? false
-            : undefined,
+      isPaid:
+        paymentStatus == null
+          ? undefined
+          : /已繳|繳清|無需繳|免繳/.test(paymentStatus)
+            ? true
+            : /未繳|待繳/.test(paymentStatus)
+              ? false
+              : undefined,
       paymentDueDate: findRecordDate(record, /繳款截止|繳費截止|到期日|payment\s*due/i),
       statementClosingDate: findRecordDate(record, /結帳日|帳單截止|statement\s*(?:closing|date)|bill\s*date/i),
       currency,
@@ -692,9 +753,7 @@ function parseBills(payload: unknown, lookbackMonths: number, now: Date) {
     });
   }
 
-  return Array.from(
-    new Map(out.map((bill) => [`${bill.billingPeriod}:${bill.currency}`, bill])).values()
-  )
+  return Array.from(new Map(out.map((bill) => [`${bill.billingPeriod}:${bill.currency}`, bill])).values())
     .sort((left, right) => right.billingPeriod.localeCompare(left.billingPeriod))
     .slice(0, Math.max(1, lookbackMonths));
 }
@@ -709,8 +768,9 @@ function parseTransactions(payload: unknown) {
     if (!postedDate || rawAmount == null || rawAmount === 0) continue;
     const description = findRecordDescription(record) || "永豐信用卡消費";
     const statusText = recordText(record);
-    const isCredit = rawAmount < 0
-      || /退款|退貨|折讓|回饋|沖銷|貸方|繳款|自扣|payment|credit|refund/i.test(`${description} ${statusText}`);
+    const isCredit =
+      rawAmount < 0 ||
+      /退款|退貨|折讓|回饋|沖銷|貸方|繳款|自扣|payment|credit|refund/i.test(`${description} ${statusText}`);
     const amount = isCredit ? Math.abs(rawAmount) : -Math.abs(rawAmount);
     const currency = currencyFromRecord(record);
     const key = [currency, postedDate, amount, description, hashString(JSON.stringify(record))].join(":");
@@ -722,15 +782,123 @@ function parseTransactions(payload: unknown) {
       amount,
       currency,
       description,
+      status: "posted",
       raw: {
         ...(sanitizeValue(record) as JsonRecord),
-        duplicateOccurrence: occurrence,
-        pending: true
+        duplicateOccurrence: occurrence
       }
     });
   }
 
   return out;
+}
+
+type SinoCardTransactionCandidate = Omit<BankTransaction, "id" | "connectorId" | "accountId" | "sourceId"> & {
+  matchKey: string;
+};
+
+function parseSinoCardTransactions(latestPayload: unknown, outstandingPayload: unknown) {
+  const pending = sinoCardResultRecords(latestPayload, "Items").flatMap<SinoCardTransactionCandidate>((record) => {
+    const transactionDate = parseDate(stringValue(record.AuthDate));
+    const rawAmount = parseAmount(stringValue(record.AuthAmt)) ?? parseAmount(stringValue(record.AuthAmtDesc));
+    if (!transactionDate || rawAmount == null || rawAmount === 0) return [];
+    const description = stringValue(record.Memo).trim() || "永豐信用卡消費";
+    const amount = signedTransactionAmount(rawAmount, description, recordText(record));
+    const cardLast4 = last4FromValue(record.CardNo);
+    const authorizedAt = dateTimeWithTaipeiOffset(transactionDate, stringValue(record.AuthTime));
+    return [{
+      matchKey: sinoCardTransactionMatchKey("TWD", transactionDate, amount, cardLast4),
+      authorizedAt,
+      amount,
+      currency: "TWD",
+      description,
+      counterparty: description,
+      status: "pending",
+      raw: sanitizeValue(record)
+    }];
+  });
+
+  const posted = sinoCardResultRecords(outstandingPayload, "Detail").flatMap<SinoCardTransactionCandidate>((record) => {
+    const transactionDate = parseDate(stringValue(record.TXDATE));
+    const rawAmount = parseAmount(stringValue(record.AMT)) ?? parseAmount(stringValue(record.TXAMT));
+    if (!transactionDate || rawAmount == null || rawAmount === 0) return [];
+    const description = stringValue(record.MEMO).trim() || "永豐信用卡消費";
+    const amount = signedTransactionAmount(rawAmount, description, recordText(record));
+    const currency = normalizeCurrency(stringValue(record.CurrencyCode) || stringValue(record.TXCUR));
+    const cardLast4 = last4FromValue(record.CardNoLast4) ?? last4FromValue(record.CardLast4);
+    return [{
+      matchKey: sinoCardTransactionMatchKey(currency, transactionDate, amount, cardLast4),
+      authorizedAt: transactionDate,
+      postedDate: parseDate(stringValue(record.DEDATE)) ?? transactionDate,
+      amount,
+      currency,
+      description,
+      counterparty: description,
+      status: "posted",
+      raw: sanitizeValue(record)
+    }];
+  });
+
+  const postedTransactions = assignSinoCardSourceIds(posted);
+  const pendingTransactions = assignSinoCardSourceIds(pending);
+  const postedCounts = new Map<string, number>();
+  for (const transaction of postedTransactions) {
+    postedCounts.set(transaction.matchKey, (postedCounts.get(transaction.matchKey) ?? 0) + 1);
+  }
+  const pendingCounts = new Map<string, number>();
+  const unmatchedPending = pendingTransactions.filter((transaction) => {
+    const occurrence = (pendingCounts.get(transaction.matchKey) ?? 0) + 1;
+    pendingCounts.set(transaction.matchKey, occurrence);
+    return occurrence > (postedCounts.get(transaction.matchKey) ?? 0);
+  });
+
+  return [...postedTransactions, ...unmatchedPending].map(({ matchKey: _matchKey, ...transaction }) => transaction);
+}
+
+function sinoCardResultRecords(payload: unknown, key: "Items" | "Detail") {
+  if (!isRecord(payload) || !isRecord(payload.Result) || !Array.isArray(payload.Result[key])) return [];
+  return payload.Result[key].filter(isRecord);
+}
+
+function assignSinoCardSourceIds(candidates: SinoCardTransactionCandidate[]) {
+  const occurrences = new Map<string, number>();
+  return candidates.map((candidate) => {
+    const occurrence = (occurrences.get(candidate.matchKey) ?? 0) + 1;
+    occurrences.set(candidate.matchKey, occurrence);
+    return {
+      ...candidate,
+      sourceId: `sinopac:card:tx:v2:${candidate.matchKey}:${occurrence}`,
+      raw: {
+        ...(candidate.raw as JsonRecord),
+        duplicateOccurrence: occurrence
+      }
+    };
+  });
+}
+
+function sinoCardTransactionMatchKey(currency: string, transactionDate: string, amount: number, cardLast4?: string) {
+  return [currency, transactionDate, amount, cardLast4 || "unknown"].join(":");
+}
+
+function signedTransactionAmount(rawAmount: number, description: string, statusText: string) {
+  const isCredit =
+    rawAmount < 0 ||
+    /退款|退貨|折讓|回饋|沖銷|貸方|繳款|自扣|payment|credit|refund/i.test(`${description} ${statusText}`);
+  return isCredit ? Math.abs(rawAmount) : -Math.abs(rawAmount);
+}
+
+function last4FromValue(value: unknown) {
+  return stringValue(value).match(/(\d{4})\D*$/)?.[1];
+}
+
+function dateTimeWithTaipeiOffset(date: string, time: string) {
+  const match = time.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return date;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3] ?? "0");
+  if (hour > 23 || minute > 59 || second > 59) return date;
+  return `${date}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}+08:00`;
 }
 
 function extractAdvertisedBillMonths(payload: unknown) {
@@ -771,10 +939,12 @@ function logicalRecords(value: unknown) {
 }
 
 function isLabelValuePair(value: unknown): value is JsonRecord {
-  return isRecord(value)
-    && typeof value.DataText === "string"
-    && value.DataValue != null
-    && typeof value.DataValue !== "object";
+  return (
+    isRecord(value) &&
+    typeof value.DataText === "string" &&
+    value.DataValue != null &&
+    typeof value.DataValue !== "object"
+  );
 }
 
 function pairArrayRecord(items: JsonRecord[]) {
@@ -788,8 +958,7 @@ function pairArrayRecord(items: JsonRecord[]) {
 
 function recordsFromHeadInfo(container: JsonRecord) {
   if (!Array.isArray(container.HeadInfo) || !Array.isArray(container.SubInfo)) return [];
-  const headers = container.HeadInfo
-    .filter(isRecord)
+  const headers = container.HeadInfo.filter(isRecord)
     .map((header) => ({
       fieldKey: stringValue(header.FieldKey).trim(),
       label: stringValue(header.HeadText).trim()
@@ -797,28 +966,26 @@ function recordsFromHeadInfo(container: JsonRecord) {
     .filter((header) => header.fieldKey && header.label);
   if (headers.length === 0) return [];
 
-  return container.SubInfo
-    .filter(isRecord)
-    .map((row) => {
-      const record: JsonRecord = {};
-      const usedKeys = new Set<string>();
-      let index = 1;
-      for (const header of headers) {
-        const value = row[header.fieldKey];
-        if (value == null || typeof value === "object") continue;
-        record[`DataText${index}`] = header.label;
-        record[`DataValue${index}`] = value;
-        usedKeys.add(header.fieldKey);
-        index += 1;
-      }
-      for (const [key, value] of Object.entries(row)) {
-        if (usedKeys.has(key) || value == null || typeof value === "object") continue;
-        record[`DataText${index}`] = key;
-        record[`DataValue${index}`] = value;
-        index += 1;
-      }
-      return record;
-    });
+  return container.SubInfo.filter(isRecord).map((row) => {
+    const record: JsonRecord = {};
+    const usedKeys = new Set<string>();
+    let index = 1;
+    for (const header of headers) {
+      const value = row[header.fieldKey];
+      if (value == null || typeof value === "object") continue;
+      record[`DataText${index}`] = header.label;
+      record[`DataValue${index}`] = value;
+      usedKeys.add(header.fieldKey);
+      index += 1;
+    }
+    for (const [key, value] of Object.entries(row)) {
+      if (usedKeys.has(key) || value == null || typeof value === "object") continue;
+      record[`DataText${index}`] = key;
+      record[`DataValue${index}`] = value;
+      index += 1;
+    }
+    return record;
+  });
 }
 
 function flattenRecords(value: unknown): JsonRecord[] {
@@ -915,18 +1082,26 @@ function findRecordDate(record: JsonRecord, pattern: RegExp, allowFallback = tru
     if (value) return value;
   }
   if (!allowFallback) return undefined;
-  return primitiveStrings(record).map(parseDate).find((value): value is string => Boolean(value));
+  return primitiveStrings(record)
+    .map(parseDate)
+    .find((value): value is string => Boolean(value));
 }
 
 function findPeriod(record: JsonRecord) {
   for (const pair of pairs(record)) {
-    if (!/帳單年月|帳單月份|帳單期|billing|bill\s*(?:month|period|date)|statement\s*(?:month|period)/i.test(normalizeLabel(pair.label))) {
+    if (
+      !/帳單年月|帳單月份|帳單期|billing|bill\s*(?:month|period|date)|statement\s*(?:month|period)/i.test(
+        normalizeLabel(pair.label)
+      )
+    ) {
       continue;
     }
     const value = parsePeriod(pair.value);
     if (value) return value;
   }
-  return primitiveStrings(record).map(parsePeriod).find((value): value is string => Boolean(value));
+  return primitiveStrings(record)
+    .map(parsePeriod)
+    .find((value): value is string => Boolean(value));
 }
 
 function findRecordDescription(record: JsonRecord) {
@@ -936,13 +1111,14 @@ function findRecordDescription(record: JsonRecord) {
     }
   }
   return primitiveStrings(record)
-    .filter((value) =>
-      value.length >= 2
-      && !parseDate(value)
-      && !parsePeriod(value)
-      && parseAmount(value) == null
-      && !/^(TWD|USD|JPY|EUR|CNY|RMB|HKD|NTD)$/i.test(value)
-      && !/^(SUCCESS|TIMEOUT|Y|N)$/i.test(value)
+    .filter(
+      (value) =>
+        value.length >= 2 &&
+        !parseDate(value) &&
+        !parsePeriod(value) &&
+        parseAmount(value) == null &&
+        !/^(TWD|USD|JPY|EUR|CNY|RMB|HKD|NTD)$/i.test(value) &&
+        !/^(SUCCESS|TIMEOUT|Y|N)$/i.test(value)
     )
     .sort((left, right) => right.length - left.length)[0];
 }
@@ -951,7 +1127,9 @@ function currencyFromRecord(record: JsonRecord) {
   for (const pair of pairs(record)) {
     if (/幣別|currency|curr/i.test(normalizeLabel(pair.label))) return normalizeCurrency(pair.value);
   }
-  const value = primitiveStrings(record).find((item) => /^(000|840|978|392|TWD|NTD|USD|JPY|EUR|CNY|RMB|HKD)$/i.test(item.trim()));
+  const value = primitiveStrings(record).find((item) =>
+    /^(000|840|978|392|TWD|NTD|USD|JPY|EUR|CNY|RMB|HKD)$/i.test(item.trim())
+  );
   return normalizeCurrency(value);
 }
 
@@ -1037,14 +1215,15 @@ function normalizeDateParts(year: number, month: number, day: number) {
   const normalizedYear = year < 1911 ? year + 1911 : year;
   const date = new Date(Date.UTC(normalizedYear, month - 1, day));
   if (
-    month < 1
-    || month > 12
-    || day < 1
-    || day > 31
-    || date.getUTCFullYear() !== normalizedYear
-    || date.getUTCMonth() !== month - 1
-    || date.getUTCDate() !== day
-  ) return undefined;
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31 ||
+    date.getUTCFullYear() !== normalizedYear ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  )
+    return undefined;
   return `${normalizedYear}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
@@ -1076,8 +1255,4 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function stringValue(value: unknown) {
   return typeof value === "string" ? value : value == null ? "" : String(value);
-}
-
-function numberValue(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }

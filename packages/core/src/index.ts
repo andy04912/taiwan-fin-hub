@@ -140,6 +140,8 @@ export interface BankBalanceSnapshot {
   raw?: unknown;
 }
 
+export type BankTransactionStatus = "pending" | "posted";
+
 export interface BankTransaction {
   id: string;
   connectorId: string;
@@ -151,6 +153,7 @@ export interface BankTransaction {
   currency: string;
   description?: string;
   counterparty?: string;
+  status?: BankTransactionStatus;
   raw?: unknown;
 }
 
@@ -178,6 +181,30 @@ export interface SyncResponse {
   cursorUpdated: boolean;
 }
 
+export type SyncNotificationStatus = "success" | "failed" | "needs_user_action";
+
+export interface NotificationPreferences {
+  success: boolean;
+  failed: boolean;
+  needsUserAction: boolean;
+}
+
+export interface PushSubscriptionInput {
+  endpoint: string;
+  expirationTime: number | null;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+}
+
+export interface NotificationConfig {
+  enabled: boolean;
+  publicKey: string | null;
+  subscribedDevices: number;
+  preferences: NotificationPreferences;
+}
+
 export interface ApiErrorResponse {
   success: false;
   error: {
@@ -186,7 +213,7 @@ export interface ApiErrorResponse {
   };
 }
 
-export const supportedConnectorIds = ["einvoice", "tdcc", "esun", "cathaybk", "sinopac"] as const;
+export const supportedConnectorIds = ["einvoice", "tdcc", "esun", "cathaybk", "sinopac", "taishin"] as const;
 export type ConnectorId = (typeof supportedConnectorIds)[number];
 
 export function isConnectorId(value: string): value is ConnectorId {
