@@ -101,31 +101,56 @@ jobs:
           set -e
 
           if [ "$merge_status" -ne 0 ]; then
-            echo "Resolving remaining conflicts in favor of current main"
             git checkout --ours -- . || true
             git add -A
-
             if git diff --name-only --diff-filter=U | grep -q .; then
               echo "Unresolved conflicts remain:"
               git diff --name-only --diff-filter=U
               exit 1
             fi
-
             git commit -m "Merge upstream/main into main"
           fi
 
           git replace -d "$sync_commit"
           echo "Merge parents: $(git show -s --format=%P HEAD)"
 
-      - name: Validate merged result
+      - name: Validate merged result and publish failure report
         shell: bash
         run: |
           set -euo pipefail
-          npm ci
-          npm run typecheck
-          npm run test:backend
-          npm run test:unit
-          npm run build
+
+          publish_failure() {
+            check_name="$1"
+            log_file="$2"
+            mkdir -p .github
+            {
+              echo "FAILED_CHECK=$check_name"
+              echo
+              echo "===== LAST 500 LOG LINES ====="
+              tail -n 500 "$log_file"
+            } > .github/upstream-validation-report-20260724.txt
+            git add .github/upstream-validation-report-20260724.txt
+            git commit -m "chore: record upstream merge validation failure"
+            git push --force origin HEAD:automation/upstream-merged-candidate
+          }
+
+          run_check() {
+            check_name="$1"
+            shift
+            log_file="/tmp/${check_name}.log"
+            if ! "$@" >"$log_file" 2>&1; then
+              cat "$log_file"
+              publish_failure "$check_name" "$log_file"
+              exit 1
+            fi
+            cat "$log_file"
+          }
+
+          run_check npm-ci npm ci
+          run_check typecheck npm run typecheck
+          run_check test-backend npm run test:backend
+          run_check test-frontend npm run test:unit
+          run_check build npm run build
 
       - name: Remove temporary synchronization setup
         shell: bash
@@ -177,6 +202,8 @@ jobs:
           rm -f .github/execute-upstream-sync-final-run-20260724
           rm -f .github/execute-upstream-sync-index-run-20260724
           rm -f .github/execute-upstream-sync-bridge-run-20260724
+          rm -f .github/execute-upstream-sync-report-run-20260724
+          rm -f .github/upstream-validation-report-20260724.txt
           git add -A
           if ! git diff --cached --quiet; then
             git commit -m "chore: clean up temporary upstream sync setup"
@@ -194,11 +221,13 @@ jobs:
             automation/execute-upstream-sync-final-run-20260724 \
             automation/execute-upstream-sync-index-run-20260724 \
             automation/execute-upstream-sync-bridge-run-20260724 \
+            automation/execute-upstream-sync-report-run-20260724 \
             automation/fix-sync-workflow-syntax-20260724 \
             automation/register-sync-workflow-20260724 \
             automation/run-upstream-sync-20260724 \
             automation/sync-upstream-20260724 \
             automation/trigger-upstream-sync-20260724 \
-            automation/upstream-conflict-report; do
+            automation/upstream-conflict-report \
+            automation/upstream-merged-candidate; do
             git push origin --delete "$branch" || true
           done
