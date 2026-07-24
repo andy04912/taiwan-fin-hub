@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -32,3 +35,37 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  sync-upstream:
+    if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'chore: execute upstream sync')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream main and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/TedLin1993/taiwan-fin-hub.git
+          git fetch upstream main
+          set +e
+          git merge --no-ff upstream/main -m "Merge upstream/main into main"
+          merge_status=$?
+          set -e
+          if [ "$merge_status" -ne 0 ]; then
+            echo "::group::Merge conflicts"
+            git status --short
+            echo "Conflicted files:"
+            git diff --name-only --diff-filter=U
+            echo "::endgroup::"
+            exit "$merge_status"
+          fi
+          git push origin main
