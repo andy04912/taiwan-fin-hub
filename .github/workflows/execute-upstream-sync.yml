@@ -139,24 +139,19 @@ jobs:
             --title "chore: 同步 upstream/main 至 ${UPSTREAM_HEAD:0:12}" \
             --body "$BODY"
 
-      - name: Publish sync failure log
+      - name: Prepare failure log
         if: failure()
         shell: bash
         run: |
-          set -euo pipefail
+          if [ ! -f /tmp/upstream-sync.log ]; then
+            printf '%s\n' "同步步驟沒有產生紀錄檔。" > /tmp/upstream-sync.log
+          fi
 
-          DEBUG_BRANCH="debug/upstream-sync-${GITHUB_RUN_ID}"
-          LOG_PATH="docs/upstream-sync-failures/${GITHUB_RUN_ID}.log"
-
-          cp /tmp/upstream-sync.log /tmp/upstream-sync-preserved.log 2>/dev/null || \
-            printf '%s\n' "同步步驟沒有產生紀錄檔。" > /tmp/upstream-sync-preserved.log
-
-          git reset --hard
-          git clean -fd
-          git checkout -B "$DEBUG_BRANCH" origin/main
-          mkdir -p "$(dirname "$LOG_PATH")"
-          cp /tmp/upstream-sync-preserved.log "$LOG_PATH"
-
-          git add "$LOG_PATH"
-          git commit -m "chore: 保存 upstream 同步失敗紀錄 ${GITHUB_RUN_ID}"
-          git push -u origin "$DEBUG_BRANCH"
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-failure-${{ github.run_id }}
+          path: /tmp/upstream-sync.log
+          if-no-files-found: error
+          retention-days: 7
