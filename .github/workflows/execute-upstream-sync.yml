@@ -1,23 +1,19 @@
-name: Execute Upstream Incremental Sync
+name: Upstream Incremental Sync
+run-name: Sync upstream/main by @${{ github.actor }}
 
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
 
 concurrency:
-  group: execute-upstream-incremental-sync
+  group: upstream-incremental-sync
   cancel-in-progress: false
 
 jobs:
   sync:
-    if: "${{ startsWith(github.event.pull_request.title, 'chore: execute upstream incremental sync') }}"
     runs-on: ubuntu-latest
 
     steps:
@@ -28,6 +24,7 @@ jobs:
           fetch-depth: 0
 
       - name: Apply upstream increment and validate
+        id: sync
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,7 +51,12 @@ jobs:
           git cat-file -e "$BASE^{commit}"
 
           if [ "$BASE" = "$UPSTREAM_HEAD" ]; then
-            echo "Already up to date."
+            echo "already_up_to_date=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Upstream 同步"
+              echo
+              echo "目前已是最新版本：\`$UPSTREAM_HEAD\`"
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -115,7 +117,7 @@ jobs:
           git commit -m "docs: 更新 upstream 同步基準"
           git push -u origin "$BRANCH"
 
-          BODY=$(cat <<EOF
+          cat > /tmp/upstream-sync-pr-body.md <<EOF
           ## 同步內容
 
           - Upstream 基準：\`$BASE\`
@@ -131,13 +133,30 @@ jobs:
           - \`npm run build\`
           - \`git diff --check\`
           EOF
-          )
 
-          gh pr create \
+          PR_URL=""
+          if PR_URL=$(gh pr create \
             --base main \
             --head "$BRANCH" \
             --title "chore: 同步 upstream/main 至 ${UPSTREAM_HEAD:0:12}" \
-            --body "$BODY"
+            --body-file /tmp/upstream-sync-pr-body.md); then
+            echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::同步分支已推送，但 GITHUB_TOKEN 無法建立 PR。請手動從 $BRANCH 對 main 建立 PR。"
+          fi
+
+          {
+            echo "## Upstream 同步完成"
+            echo
+            echo "- 基準：\`$BASE\`"
+            echo "- 最新：\`$UPSTREAM_HEAD\`"
+            echo "- 分支：\`$BRANCH\`"
+            if [ -n "$PR_URL" ]; then
+              echo "- PR：$PR_URL"
+            else
+              echo "- PR：未自動建立，請以此分支手動建立"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Prepare failure log
         if: failure()
