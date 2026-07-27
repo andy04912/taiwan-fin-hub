@@ -1,0 +1,139 @@
+name: Execute Upstream Incremental Sync
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: execute-upstream-incremental-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: "${{ startsWith(github.event.pull_request.title, 'chore: execute upstream incremental sync') }}"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Apply upstream increment and validate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "taiwan-fin-hub-updater"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/TedLin1993/taiwan-fin-hub.git
+          git fetch --no-tags upstream main
+
+          BASE=$(sed -n 's/^LAST_SYNCED_UPSTREAM_SHA=//p' docs/upstream-sync-playbook.md | head -n 1)
+          UPSTREAM_HEAD=$(git rev-parse upstream/main)
+          BRANCH="sync/upstream-${UPSTREAM_HEAD:0:12}-${GITHUB_RUN_ID}"
+
+          echo "BASE=$BASE"
+          echo "UPSTREAM_HEAD=$UPSTREAM_HEAD"
+          echo "BRANCH=$BRANCH"
+
+          test -n "$BASE"
+          git cat-file -e "$BASE^{commit}"
+
+          if [ "$BASE" = "$UPSTREAM_HEAD" ]; then
+            echo "Already up to date."
+            exit 0
+          fi
+
+          git checkout -b "$BRANCH"
+          git diff --binary --full-index --find-renames \
+            "$BASE" "$UPSTREAM_HEAD" \
+            > /tmp/taiwan-fin-hub-upstream.patch
+
+          if ! git apply --3way --index /tmp/taiwan-fin-hub-upstream.patch; then
+            echo "Upstream 增量套用失敗，衝突檔案如下：" >&2
+            git status --short >&2 || true
+            git diff --name-only --diff-filter=U >&2 || true
+            exit 1
+          fi
+
+          npm ci
+          npm run typecheck
+          npm run test:backend
+          npm run test:unit
+          npm run build
+          git diff --check
+
+          python - <<PY
+          from pathlib import Path
+          import re
+
+          path = Path("docs/upstream-sync-playbook.md")
+          text = path.read_text(encoding="utf-8")
+          text = re.sub(
+              r"^LAST_SYNCED_UPSTREAM_SHA=.*$",
+              "LAST_SYNCED_UPSTREAM_SHA=$UPSTREAM_HEAD",
+              text,
+              flags=re.MULTILINE,
+          )
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          git add -A
+          git commit -m "chore: 同步 upstream/main 至 ${UPSTREAM_HEAD:0:12}"
+          SYNC_COMMIT=$(git rev-parse HEAD)
+
+          python - <<PY
+          from pathlib import Path
+          import re
+
+          path = Path("docs/upstream-sync-playbook.md")
+          text = path.read_text(encoding="utf-8")
+          text = re.sub(
+              r"^LAST_SYNC_COMMIT=.*$",
+              "LAST_SYNC_COMMIT=$SYNC_COMMIT",
+              text,
+              flags=re.MULTILINE,
+          )
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          git add docs/upstream-sync-playbook.md
+          git commit -m "docs: 更新 upstream 同步基準"
+          git push -u origin "$BRANCH"
+
+          BODY=$(cat <<EOF
+          ## 同步內容
+
+          - Upstream 基準：\`$BASE\`
+          - Upstream 最新：\`$UPSTREAM_HEAD\`
+          - 僅套用兩者之間的增量，未直接合併 unrelated histories
+          - 保留目前 App Shell 與客製化 UI
+
+          ## 驗證
+
+          - \`npm run typecheck\`
+          - \`npm run test:backend\`
+          - \`npm run test:unit\`
+          - \`npm run build\`
+          - \`git diff --check\`
+          EOF
+          )
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: 同步 upstream/main 至 ${UPSTREAM_HEAD:0:12}" \
+            --body "$BODY"
