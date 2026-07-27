@@ -10,6 +10,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 concurrency:
   group: execute-upstream-incremental-sync
@@ -33,6 +34,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          exec > >(tee /tmp/upstream-sync.log) 2>&1
 
           git config user.name "taiwan-fin-hub-updater"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -137,3 +139,28 @@ jobs:
             --head "$BRANCH" \
             --title "chore: 同步 upstream/main 至 ${UPSTREAM_HEAD:0:12}" \
             --body "$BODY"
+
+      - name: Report sync failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "自動同步 upstream 失敗。"
+            echo
+            echo "- Run ID: ${GITHUB_RUN_ID}"
+            echo "- Target commit: ${GITHUB_SHA}"
+            echo
+            echo '```text'
+            if [ -f /tmp/upstream-sync.log ]; then
+              tail -n 220 /tmp/upstream-sync.log
+            else
+              echo "同步步驟沒有產生紀錄檔。"
+            fi
+            echo '```'
+          } > /tmp/upstream-sync-failure.md
+
+          gh issue create \
+            --title "Upstream sync failed (${GITHUB_RUN_ID})" \
+            --body-file /tmp/upstream-sync-failure.md
