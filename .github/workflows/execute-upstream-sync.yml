@@ -10,7 +10,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 concurrency:
   group: execute-upstream-incremental-sync
@@ -140,27 +139,24 @@ jobs:
             --title "chore: 同步 upstream/main 至 ${UPSTREAM_HEAD:0:12}" \
             --body "$BODY"
 
-      - name: Report sync failure
+      - name: Publish sync failure log
         if: failure()
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          {
-            echo "自動同步 upstream 失敗。"
-            echo
-            echo "- Run ID: ${GITHUB_RUN_ID}"
-            echo "- Target commit: ${GITHUB_SHA}"
-            echo
-            echo '```text'
-            if [ -f /tmp/upstream-sync.log ]; then
-              tail -n 220 /tmp/upstream-sync.log
-            else
-              echo "同步步驟沒有產生紀錄檔。"
-            fi
-            echo '```'
-          } > /tmp/upstream-sync-failure.md
+          set -euo pipefail
 
-          gh issue create \
-            --title "Upstream sync failed (${GITHUB_RUN_ID})" \
-            --body-file /tmp/upstream-sync-failure.md
+          DEBUG_BRANCH="debug/upstream-sync-${GITHUB_RUN_ID}"
+          LOG_PATH="docs/upstream-sync-failures/${GITHUB_RUN_ID}.log"
+
+          cp /tmp/upstream-sync.log /tmp/upstream-sync-preserved.log 2>/dev/null || \
+            printf '%s\n' "同步步驟沒有產生紀錄檔。" > /tmp/upstream-sync-preserved.log
+
+          git reset --hard
+          git clean -fd
+          git checkout -B "$DEBUG_BRANCH" origin/main
+          mkdir -p "$(dirname "$LOG_PATH")"
+          cp /tmp/upstream-sync-preserved.log "$LOG_PATH"
+
+          git add "$LOG_PATH"
+          git commit -m "chore: 保存 upstream 同步失敗紀錄 ${GITHUB_RUN_ID}"
+          git push -u origin "$DEBUG_BRANCH"
