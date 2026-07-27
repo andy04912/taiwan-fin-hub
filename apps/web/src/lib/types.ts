@@ -34,7 +34,7 @@ export type PrimaryView =
 export type DetailView = "bank" | "cards" | "investments" | "manual-assets";
 export type MobileSettingsView =
   "data-sources" | "exchange-rates" | "classification-rules";
-export type View = PrimaryView | DetailView | MobileSettingsView | "more";
+export type View = PrimaryView | DetailView | MobileSettingsView | "more" | "sync-notifications";
 export type AssetSection =
   "all" | "bank" | "cards" | "investments" | "manual-assets";
 export interface MoneyVisibilityState {

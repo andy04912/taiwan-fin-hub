@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { SvelteDate } from "svelte/reactivity";
+  import { toStore } from "svelte/store";
   import {
     createMutation,
     createQuery,
@@ -36,16 +36,17 @@
   import { queryKeys } from "@/shared/api/query-keys";
   import type { View } from "@/app/types";
   import { exchangeRatesQuery } from "@/data/assets/queries";
-  import { bankQuery } from "@/data/bank/queries";
+  import { bankRangeQuery } from "@/data/bank/queries";
   import type { BankData, BankTransactionRow } from "@/data/bank/types";
   import { classificationCategoriesQuery } from "@/data/classification/queries";
-  import { investmentTransactionsQuery } from "@/data/investments/queries";
+  import { investmentTransactionsRangeQuery } from "@/data/investments/queries";
   import {
+    invoiceDetailQuery,
     invoiceTransactionMappingsQuery,
-    invoicesQuery,
+    invoicesRangeQuery,
   } from "@/data/invoices/queries";
   import type {
-    InvoiceRow,
+    InvoiceSummaryRow,
     InvoiceTransactionPreference,
   } from "@/data/invoices/types";
   import type { ActivityItem, PendingCategoryUpdate } from "./model/types";
@@ -59,7 +60,7 @@
     deduplicateBankTransactions,
     invoiceTransactionCandidates,
     matchInvoicesToTransactions,
-  } from "./model/matching";
+  } from "@/data/activity/matching";
   import {
     formatCompactTwd,
     formatCurrency,
@@ -68,28 +69,33 @@
     normalizeFinancialDate,
     rateMap,
   } from "@/shared/format/financial";
+  import { recentMonthRange, recentMonthKeys } from "@/shared/date-range";
   import { swipeBack } from "@/shared/actions/swipe-back";
   let { api, navigate }: { api: ApiClient; navigate: (view: View) => void } =
     $props();
-  const bank = createQuery(bankQuery(() => api));
-  const invoices = createQuery(invoicesQuery(() => api));
+  const initialSelectedMonth = new Date().toISOString().slice(0, 7);
+  let selectedMonth = $state(initialSelectedMonth);
+  const activityRange = recentMonthRange(6);
+  const bank = createQuery(bankRangeQuery(() => api, activityRange));
+  const invoices = createQuery(invoicesRangeQuery(() => api, activityRange));
   const invoiceMappings = createQuery(
     invoiceTransactionMappingsQuery(() => api),
   );
-  const trades = createQuery(investmentTransactionsQuery(() => api));
+  const trades = createQuery(
+    investmentTransactionsRangeQuery(() => api, activityRange),
+  );
   const rates = createQuery(exchangeRatesQuery(() => api));
   const categoryRows = createQuery(classificationCategoriesQuery(() => api));
   const qc = useQueryClient();
   let source = $state<"all" | "bank" | "card" | "invoice">("all");
   let search = $state("");
-  let selectedMonth = $state(new Date().toISOString().slice(0, 7));
   let selectedCategory = $state<{
     flow: "income" | "expense";
     category: string;
   } | null>(null);
   let pending = $state<PendingCategoryUpdate | null>(null);
   let mappingDialog = $state<{
-    invoice: InvoiceRow;
+    invoice: InvoiceSummaryRow;
     step: "candidates" | "confirm" | "actions";
     transactionId?: string;
   } | null>(null);
@@ -175,9 +181,6 @@
           transactionId: t.id,
           invoiceId: matchedInvoice?.id,
           invoiceAmount: matchedInvoice?.amount,
-          invoiceSearchText: matchedInvoice
-            ? `${matchedInvoice.sellerName ?? ""} ${matchedInvoice.invoiceNumber ?? ""} ${matchedInvoice.items.map((item) => item.description).join(" ")}`
-            : undefined,
           excludedFromCalculation: t.excludedFromCalculation,
           status: t.status,
         };
@@ -195,7 +198,6 @@
           category: "發票",
           invoiceId: i.id,
           invoiceAmount: i.amount,
-          invoiceSearchText: i.items.map((item) => item.description).join(" "),
           status: "已開立",
         })),
       ...($trades.data ?? []).map((t) => ({
@@ -219,18 +221,12 @@
   const detailItem = $derived(
     rawItems.find((item) => activityKey(item) === detailKey),
   );
-  const months = $derived(
-    [
-      ...new Set(
-        rawItems
-          .map((i) => i.date.slice(0, 7))
-          .filter(Boolean)
-          .concat([new Date().toISOString().slice(0, 7)]),
-      ),
-    ]
-      .sort((a, b) => b.localeCompare(a))
-      .slice(0, 12),
+  const detailInvoiceId = $derived(detailItem?.invoiceId ?? null);
+  const detailInvoice = createQuery(
+    toStore(() => invoiceDetailQuery(() => api, detailInvoiceId)),
   );
+  const cashFlowMonths = recentMonthKeys(6);
+  const months = [...cashFlowMonths].reverse();
   const monthlyCalculatedItems = $derived(
     rawItems.filter(
       (item) =>
@@ -261,11 +257,6 @@
         (item.status === "pending" || item.categoryId === "other"),
     ).length,
   );
-  const cashFlowMonths = Array.from({ length: 6 }, (_, index) => {
-    const date = new SvelteDate();
-    date.setMonth(date.getMonth() - (5 - index));
-    return date.toISOString().slice(0, 7);
-  });
   const cashFlow = $derived(
     cashFlowMonths.map((month) => {
       const items = rawItems.filter(
@@ -307,7 +298,7 @@
         matchesSource &&
         item.date.startsWith(selectedMonth) &&
         (!search.trim() ||
-          `${item.title} ${item.subtitle} ${item.category} ${item.invoiceSearchText ?? ""}`
+          `${item.title} ${item.subtitle} ${item.category}`
             .toLowerCase()
             .includes(search.toLowerCase())) &&
         (!selectedCategory ||
@@ -511,7 +502,7 @@
     );
   }
   function mappingDifference(
-    invoice: InvoiceRow,
+    invoice: InvoiceSummaryRow,
     transaction: BankTransactionRow,
   ) {
     return Math.abs(invoice.amount - Math.abs(transaction.amount));
@@ -728,7 +719,7 @@
               class="p-8 text-center text-sm text-ink/50"
             >
               沒有符合條件的活動。
-            </p>{:else}{#each filtered.slice(0, 100) as item (item.source + "-" + item.id)}{@const amount =
+            </p>{:else}{#each filtered as item (item.source + "-" + item.id)}{@const amount =
                 activityDisplayAmount(item)}
               <button
                 aria-label={`查看 ${item.title} 活動詳情`}
@@ -780,7 +771,7 @@
                   ><td class="px-5 py-8 text-center text-ink/50" colspan="5"
                     >沒有符合條件的活動。</td
                   ></tr
-                >{:else}{#each filtered.slice(0, 100) as item (item.source + "-" + item.id)}{@const amount =
+                >{:else}{#each filtered as item (item.source + "-" + item.id)}{@const amount =
                     activityDisplayAmount(item)}<tr
                     aria-label={`查看 ${item.title} 活動詳情`}
                     class={`cursor-pointer transition hover:bg-paper focus-visible:outline-2 focus-visible:outline-steel ${item.excludedFromCalculation ? "bg-ink/[0.025]" : ""}`}
@@ -966,12 +957,20 @@
 
             {#if invoice}<section class="border-b border-ink/10 py-5">
                 <h3 class="text-base font-semibold">發票細項</h3>
-                {#if invoice.items.length === 0}<p
+                {#if $detailInvoice.isPending}<p
+                    class="mt-3 rounded-xl bg-paper p-4 text-sm text-ink/50"
+                  >
+                    載入發票細項中。
+                  </p>{:else if $detailInvoice.isError}<p
+                    class="mt-3 rounded-xl bg-coral/10 p-4 text-sm text-coral"
+                  >
+                    無法載入發票細項，請稍後再試。
+                  </p>{:else if !$detailInvoice.data || $detailInvoice.data.items.length === 0}<p
                     class="mt-3 rounded-xl bg-paper p-4 text-sm text-ink/50"
                   >
                     此發票沒有品項明細。
                   </p>{:else}<div class="mt-2 divide-y divide-ink/10">
-                    {#each invoice.items as line (line.id)}<div
+                    {#each $detailInvoice.data.items as line (line.id)}<div
                         class="flex items-start justify-between gap-4 py-3"
                       >
                         <div class="min-w-0">

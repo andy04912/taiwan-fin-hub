@@ -104,7 +104,7 @@ test("keeps long recent activity inside the overview card", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.route("**/api/bank", async (route) => {
+  await page.route("**/api/bank**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -200,7 +200,7 @@ test("excludes a bank transaction from activity calculations and restores it", a
   let excludedFromCalculation = false;
   const month = new Date().toISOString().slice(0, 7);
 
-  await page.route("**/api/bank", async (route) => {
+  await page.route("**/api/bank**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -390,7 +390,7 @@ test("merges a matching invoice and counts an unmatched invoice as expense", asy
   page,
 }) => {
   const month = new Date().toISOString().slice(0, 7);
-  await page.route("**/api/bank", async (route) => {
+  await page.route("**/api/bank**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -414,7 +414,7 @@ test("merges a matching invoice and counts an unmatched invoice as expense", asy
             sourceId: "transaction-source-1",
             postedDate: `${month}-10`,
             authorizedAt: `${month}-10T12:00:00.000Z`,
-            amount: 860,
+            amount: -860,
             currency: "TWD",
             description: "信用卡消費",
             counterparty: "好食餐飲",
@@ -430,7 +430,7 @@ test("merges a matching invoice and counts an unmatched invoice as expense", asy
       }),
     });
   });
-  await page.route("**/api/invoices", async (route) => {
+  await page.route("**/api/invoices**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -526,7 +526,7 @@ test("manually maps, manages, and separates a same-day invoice transaction on mo
     }
     await route.fulfill({ json: mappings });
   });
-  await page.route("**/api/bank", async (route) => {
+  await page.route("**/api/bank**", async (route) => {
     await route.fulfill({
       json: {
         accounts: [
@@ -581,30 +581,35 @@ test("manually maps, manages, and separates a same-day invoice transaction on mo
       },
     });
   });
-  await page.route("**/api/invoices", async (route) => {
+  await page.route("**/api/invoices**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const invoice = {
+      id: "invoice-1",
+      connectorId: "einvoice",
+      sourceId: "invoice-source-1",
+      invoiceDate: `${month}-06T04:39:18.000Z`,
+      invoiceNumber: "DR95850239",
+      sellerName: "菲尖極道商行",
+      amount: 50,
+    };
     await route.fulfill({
-      json: [
-        {
-          id: "invoice-1",
-          connectorId: "einvoice",
-          sourceId: "invoice-source-1",
-          invoiceDate: `${month}-06T04:39:18.000Z`,
-          invoiceNumber: "DR95850239",
-          sellerName: "菲尖極道商行",
-          amount: 50,
-          items: [
-            {
-              id: "invoice-line-1",
-              sourceId: "invoice-line-source-1",
-              lineNumber: 1,
-              description: "瓶裝飲料",
-              quantity: 1,
-              unitPrice: 50,
-              amount: 50,
-            },
-          ],
-        },
-      ],
+      json:
+        path === "/api/invoices/invoice-1"
+          ? {
+              ...invoice,
+              items: [
+                {
+                  id: "invoice-line-1",
+                  sourceId: "invoice-line-source-1",
+                  lineNumber: 1,
+                  description: "瓶裝飲料",
+                  quantity: 1,
+                  unitPrice: 50,
+                  amount: 50,
+                },
+              ],
+            }
+          : [invoice],
     });
   });
 
@@ -655,4 +660,52 @@ test("manually maps, manages, and separates a same-day invoice transaction on mo
   await expect(page.getByText("已解除配對，兩筆活動將保持分開")).toBeVisible();
   await expect(page.getByText("菲尖極道商行").first()).toBeVisible();
   await expect(page.getByText("全支付﹘樂法 台中漢口店").first()).toBeVisible();
+});
+
+test("loads invoice line items only after expanding an invoice", async ({
+  page,
+}) => {
+  const month = new Date().toISOString().slice(0, 7);
+  let detailRequests = 0;
+  const invoice = {
+    id: "lazy-invoice",
+    connectorId: "einvoice",
+    sourceId: "lazy-source",
+    invoiceDate: `${month}-12T10:00:00.000Z`,
+    invoiceNumber: "AB12345678",
+    sellerName: "延遲載入商店",
+    amount: 120,
+  };
+  await page.route("**/api/invoices**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/invoices/lazy-invoice") {
+      detailRequests += 1;
+      await route.fulfill({
+        json: {
+          ...invoice,
+          items: [
+            {
+              id: "lazy-line",
+              sourceId: "lazy-line-source",
+              lineNumber: 1,
+              description: "延遲載入品項",
+              quantity: 1,
+              unitPrice: 120,
+              amount: 120,
+            },
+          ],
+        },
+      });
+      return;
+    }
+    await route.fulfill({ json: [invoice] });
+  });
+
+  await page.goto("/#/invoices");
+  await expect(page.getByText("延遲載入商店")).toBeVisible();
+  expect(detailRequests).toBe(0);
+
+  await page.getByRole("button", { name: /延遲載入商店/ }).click();
+  await expect(page.getByText("延遲載入品項", { exact: true })).toBeVisible();
+  expect(detailRequests).toBe(1);
 });
