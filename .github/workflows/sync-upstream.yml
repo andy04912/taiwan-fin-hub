@@ -11,12 +11,12 @@ permissions:
 
 concurrency:
   group: sync-upstream
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   sync:
     # 官方 repository 不需要同步自己；Deploy to Cloudflare 建立的副本才會執行。
-    if: github.repository != 'TedLin1993/taiwan-fin-hub'
+    if: github.repository != 'TedLin1993/taiwan-fin-hub' && github.repository != 'TedLin1993/all-set-tw'
     runs-on: ubuntu-latest
 
     steps:
@@ -26,7 +26,7 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Merge upstream main
+      - name: Sync upstream main safely
         shell: bash
         run: |
           set -euo pipefail
@@ -34,17 +34,13 @@ jobs:
           git config user.name "taiwan-fin-hub-updater"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git remote remove upstream 2>/dev/null || true
-          git remote add upstream https://github.com/TedLin1993/taiwan-fin-hub.git
-          git fetch --no-tags upstream main
-
-          before=$(git rev-parse HEAD)
-          git merge --no-edit upstream/main
-          after=$(git rev-parse HEAD)
-
-          if [ "$before" = "$after" ]; then
-            echo "Already up to date."
-            exit 0
+          updater="scripts/sync-upstream.mjs"
+          if [ ! -f "$updater" ]; then
+            # 舊版 Cloudflare 部署 repo 尚未包含 updater script；只下載至 runner 暫存目錄。
+            updater="$RUNNER_TEMP/sync-upstream.mjs"
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+              "https://raw.githubusercontent.com/TedLin1993/all-set-tw/main/scripts/sync-upstream.mjs" \
+              --output "$updater"
           fi
 
-          git push origin HEAD:main
+          node "$updater"
