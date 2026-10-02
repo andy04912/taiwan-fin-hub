@@ -10,6 +10,10 @@
   import type { ApiClient } from "@/shared/api/client";
   import { connectorSettingsQuery } from "@/data/connectors/queries";
   import type { ConnectorId, SyncJobRow } from "@/data/connectors/types";
+  import {
+    getSyncSourceStatus,
+    getSyncSourceStatusLabel,
+  } from "@/data/connectors/sync-status";
   import { formatDateTime } from "@/shared/format/financial";
   let {
     api,
@@ -42,9 +46,10 @@
       (item) => item.connectorId === id && item.scope === "all",
     ),
   );
-  const needsAction = $derived(
-    job?.lastStatus === "failed" || job?.lastStatus === "needs_user_action",
+  const sourceStatus = $derived(
+    getSyncSourceStatus(job, $settings.data?.configured ?? job?.configured),
   );
+  const needsAction = $derived(sourceStatus === "needs_action");
   const weekdays = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
   const scheduleLabel = $derived(
     !job?.enabled
@@ -83,27 +88,20 @@
         >{title}</span
       >
       <span class="block truncate text-sm text-muted-foreground">
-        {job?.lastSuccessAt
-          ? `最近同步 ${formatDateTime(job.lastSuccessAt)}`
-          : $settings.data?.configured
-            ? "尚未成功同步"
-            : "尚未設定"}
+        {sourceStatus === "unconfigured"
+          ? "尚未設定"
+          : job?.lastSuccessAt
+            ? `${sourceStatus === "healthy" ? "最近同步" : "上次成功"} ${formatDateTime(job.lastSuccessAt)}`
+            : "尚未成功同步"}
       </span>
     </span>
     <Badge
       class="shrink-0 whitespace-nowrap text-sm"
       variant={needsAction
         ? "destructive"
-        : $settings.data?.configured && job?.lastSuccessAt
+        : sourceStatus === "healthy"
           ? "success"
-          : "secondary"}
-      >{needsAction
-        ? "需要處理"
-        : $settings.data?.configured && job?.lastSuccessAt
-          ? "正常"
-          : $settings.data?.configured
-            ? "尚未同步"
-            : "未設定"}</Badge
+          : "secondary"}>{getSyncSourceStatusLabel(sourceStatus)}</Badge
     >
     {#if compactCard}<span
         aria-hidden="true"
@@ -130,14 +128,9 @@
           class="shrink-0 whitespace-nowrap text-sm"
           variant={needsAction
             ? "destructive"
-            : $settings.data?.configured
+            : sourceStatus === "healthy"
               ? "success"
-              : "secondary"}
-          >{needsAction
-            ? "需要處理"
-            : $settings.data?.configured
-              ? "已設定"
-              : "未設定"}</Badge
+              : "secondary"}>{getSyncSourceStatusLabel(sourceStatus)}</Badge
         >
       </div>
       <div

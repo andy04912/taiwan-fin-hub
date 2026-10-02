@@ -7,28 +7,44 @@
   import type { BankData } from "@/data/bank/types";
   import type { ClassificationRuleRow } from "@/data/classification/types";
   import { connectorDefinitions } from "@/data/connectors/definitions";
-  import type { SyncJobRow } from "@/data/connectors/types";
+  import {
+    getActionableSyncJobs,
+    getHealthySyncJobs,
+    getPendingSyncJobs,
+    getSyncSourceStatus,
+    getSyncSourceStatusLabel,
+  } from "@/data/connectors/sync-status";
+  import type { ConnectorId, SyncJobRow } from "@/data/connectors/types";
   let {
     demoMode,
     jobs,
+    jobsLoading = false,
+    jobsError = false,
     rules,
     bank,
     navigate,
+    openConnector,
   }: {
     api: ApiClient;
     demoMode: boolean;
     jobs: SyncJobRow[];
+    jobsLoading?: boolean;
+    jobsError?: boolean;
     rules: ClassificationRuleRow[];
     bank: BankData;
     navigate: (view: View) => void;
+    openConnector: (id: ConnectorId) => void;
   } = $props();
   const sources = connectorDefinitions;
-  const unhealthy = $derived(
-    jobs.filter(
-      (job) =>
-        job.lastStatus === "failed" || job.lastStatus === "needs_user_action",
-    ),
+  const configuredSources = $derived(
+    jobs.filter((job) => job.configured && job.scope === "all"),
   );
+  const customRuleCount = $derived(
+    rules.filter((rule) => !rule.isSystem).length,
+  );
+  const unhealthy = $derived(getActionableSyncJobs(jobs));
+  const healthy = $derived(getHealthySyncJobs(jobs));
+  const pending = $derived(getPendingSyncJobs(jobs));
 </script>
 
 <div class="grid gap-4">
@@ -40,11 +56,27 @@
     ><CardContent class="pt-5"
       ><p class="text-sm font-semibold text-ink/45">資料健康度</p>
       <p class="mt-2 text-2xl font-bold">
-        {Math.max(sources.length - unhealthy.length, 0)} / {sources.length} 來源正常
+        {#if jobsLoading}
+          同步狀態載入中…
+        {:else if jobsError}
+          無法載入同步狀態
+        {:else if configuredSources.length === 0}
+          尚未設定資料來源
+        {:else}
+          {healthy.length} / {configuredSources.length} 已設定來源正常
+        {/if}
       </p>
-      {#if unhealthy.length}<p class="mt-2 text-sm font-semibold text-coral">
+      {#if jobsError}
+        <p class="mt-2 text-sm font-semibold text-coral">請稍後再試。</p>
+      {:else if unhealthy.length}
+        <p class="mt-2 text-sm font-semibold text-coral">
           {unhealthy.length} 個來源需要處理
-        </p>{/if}</CardContent
+        </p>
+      {:else if pending.length}
+        <p class="mt-2 text-sm font-semibold text-amber-700">
+          {pending.length} 個來源等待首次同步
+        </p>
+      {/if}</CardContent
     ></Card
   >
   <section>
@@ -85,7 +117,7 @@
             ><WalletCards class="size-5" /></span
           ><span class="flex-1"
             ><span class="block font-semibold">匯率</span><span
-              class="block text-sm text-ink/45">管理外幣換算</span
+              class="block text-sm text-ink/45">查看外幣換算</span
             ></span
           ><span class="text-sm font-semibold text-steel">›</span></button
         >
@@ -97,10 +129,10 @@
             ><Settings class="size-5" /></span
           ><span class="flex-1"
             ><span class="block font-semibold">分類規則</span><span
-              class="block text-sm text-ink/45">銀行交易自動分類</span
+              class="block text-sm text-ink/45">自訂分類與自動配對</span
             ></span
           ><span class="text-sm font-semibold text-steel"
-            >{rules.length} 條　›</span
+            >{customRuleCount} 條自訂　›</span
           ></button
         >
       </div></Card
@@ -119,22 +151,23 @@
         {#each sources as source (source.id)}{@const job = jobs.find(
             (item) => item.connectorId === source.id,
           )}
-          <div
-            class="flex items-center justify-between gap-3 px-4 py-3 text-sm"
+          <button
+            type="button"
+            class="flex min-h-12 w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm transition hover:bg-paper focus-visible:outline-2 focus-visible:outline-steel"
+            aria-label={`管理${source.title}`}
+            onclick={() => openConnector(source.id)}
           >
             <span class="font-semibold">{source.title}</span><span
-              class={job?.lastStatus === "failed" ||
-              job?.lastStatus === "needs_user_action"
+              class={getSyncSourceStatus(job) === "needs_action"
                 ? "text-coral"
-                : "text-moss"}
-              >{job?.lastStatus === "failed" ||
-              job?.lastStatus === "needs_user_action"
-                ? "需要處理"
-                : job?.lastSuccessAt
-                  ? "正常"
-                  : "尚未同步"}</span
+                : getSyncSourceStatus(job) === "not_synced"
+                  ? "text-amber-700"
+                  : getSyncSourceStatus(job) === "healthy"
+                    ? "text-moss"
+                    : "text-ink/45"}
+              >{getSyncSourceStatusLabel(getSyncSourceStatus(job))}</span
             >
-          </div>{/each}
+          </button>{/each}
       </div></Card
     >
   </section>

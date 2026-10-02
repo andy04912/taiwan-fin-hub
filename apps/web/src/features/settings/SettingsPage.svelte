@@ -10,6 +10,12 @@
     connectorFields,
   } from "@/data/connectors/definitions";
   import { syncJobsQuery } from "@/data/connectors/queries";
+  import {
+    getActionableSyncJobs,
+    getConfiguredSyncJobs,
+    getHealthySyncJobs,
+    getPendingSyncJobs,
+  } from "@/data/connectors/sync-status";
   import { notificationConfigQuery } from "@/data/notifications/queries";
   import type { ConnectorId } from "@/data/connectors/types";
   import { formatDateTime } from "@/shared/format/financial";
@@ -23,11 +29,13 @@
   let {
     api,
     demoMode,
+    connectorTarget,
     mobileView,
     navigate,
   }: {
     api: ApiClient;
     demoMode: boolean;
+    connectorTarget?: ConnectorId | null;
     mobileView?: MobileSettingsView | "more";
     navigate: (view: View) => void;
   } = $props();
@@ -53,19 +61,23 @@
   const bank = createQuery(bankQuery(() => api));
   const rates = createQuery(exchangeRatesQuery(() => api));
   const notifications = createQuery(notificationConfigQuery(() => api));
-  let selectedConnector = $state<ConnectorId | null>(null);
-  const needsAction = $derived(
-    ($jobs.data ?? []).filter(
-      (j) => j.lastStatus === "failed" || j.lastStatus === "needs_user_action",
-    ).length,
+  let selectedConnector = $state<ConnectorId | null | undefined>(undefined);
+  const activeConnector = $derived(
+    selectedConnector === undefined
+      ? (connectorTarget ?? null)
+      : selectedConnector,
   );
-  const healthySources = $derived(Math.max(sources.length - needsAction, 0));
-  const actionJob = $derived(
-    ($jobs.data ?? []).find(
-      (job) =>
-        job.lastStatus === "failed" || job.lastStatus === "needs_user_action",
-    ),
+  const syncJobsState = $derived(
+    $jobs.isPending ? "loading" : $jobs.isError ? "error" : "ready",
   );
+  const syncJobRows = $derived($jobs.data ?? []);
+  const needsActionJobs = $derived(getActionableSyncJobs(syncJobRows));
+  const pendingSyncJobs = $derived(getPendingSyncJobs(syncJobRows));
+  const configuredSources = $derived(getConfiguredSyncJobs(syncJobRows));
+  const healthySources = $derived(getHealthySyncJobs(syncJobRows));
+  const needsAction = $derived(needsActionJobs.length);
+  const pendingSources = $derived(pendingSyncJobs.length);
+  const actionJob = $derived(needsActionJobs.at(0));
   const actionSource = $derived(
     sources.find((source) => source.id === actionJob?.connectorId),
   );
@@ -76,12 +88,14 @@
     }, undefined),
   );
   const inheritedJob = $derived(
-    ($jobs.data ?? []).find(
-      (job) => job.scope === "all" && job.scheduleMode === "inherit",
+    configuredSources.find(
+      (job) => job.enabled && job.scheduleMode === "inherit",
     ),
   );
   const inheritedJobCount = $derived(
-    ($jobs.data ?? []).filter((job) => job.scheduleMode === "inherit").length,
+    configuredSources.filter(
+      (job) => job.enabled && job.scheduleMode === "inherit",
+    ).length,
   );
   const scheduleSummary = $derived(
     !inheritedJob
@@ -94,7 +108,7 @@
   );
   const ratesSummary = $derived(
     ($rates.data ?? [])
-      .map((rate) => `${rate.currency} ${rate.rateTwd.toFixed(3)}`)
+      .map((rate) => `${rate.currency} ${rate.rateTwd.toFixed(2)}`)
       .join(" · ") || "尚未設定",
   );
   const notificationSummary = $derived(
@@ -109,15 +123,18 @@
       ? "失敗與重新驗證時通知"
       : "前往同步與通知開啟",
   );
+  const customRuleCount = $derived(
+    ($rules.data ?? []).filter((rule) => !rule.isSystem).length,
+  );
   const rulesSummary = $derived(
-    $rules.isPending ? "載入中…" : `${$rules.data?.length ?? 0} 條銀行交易規則`,
+    $rules.isPending
+      ? "載入中…"
+      : `${customRuleCount} 條自訂規則 · 含自動分類與配對`,
   );
   const enabledRuleCount = $derived(
-    ($rules.data ?? []).filter((rule) => rule.enabled).length,
+    ($rules.data ?? []).filter((rule) => !rule.isSystem && rule.enabled).length,
   );
-  const recentJobs = $derived(
-    ($jobs.data ?? []).filter((job) => job.scope === "all"),
-  );
+  const recentJobs = $derived(getConfiguredSyncJobs(syncJobRows));
   const recentSuccessCount = $derived(
     recentJobs.filter((job) => job.lastStatus === "success").length,
   );
@@ -128,7 +145,40 @@
     }, undefined),
   );
   function selectConnector(id: ConnectorId) {
-    selectedConnector = selectedConnector === id ? null : id;
+    selectedConnector = activeConnector === id ? null : id;
+  }
+
+  function openConnector(id: ConnectorId) {
+    selectedConnector = id;
+    navigate("data-sources");
+  }
+
+  function scrollSelectedConnector(node: HTMLElement, selected: boolean) {
+    let firstFrame: number | undefined;
+    let secondFrame: number | undefined;
+
+    function cancelScheduledScroll() {
+      if (firstFrame !== undefined) cancelAnimationFrame(firstFrame);
+      if (secondFrame !== undefined) cancelAnimationFrame(secondFrame);
+      firstFrame = undefined;
+      secondFrame = undefined;
+    }
+
+    function scheduleScroll(active: boolean) {
+      cancelScheduledScroll();
+      if (!active) return;
+      firstFrame = requestAnimationFrame(() => {
+        secondFrame = requestAnimationFrame(() => {
+          node.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+    }
+
+    scheduleScroll(selected);
+    return {
+      update: scheduleScroll,
+      destroy: cancelScheduledScroll,
+    };
   }
 
   function isActiveTab(tabView: (typeof settingTabs)[number]["view"]) {
@@ -156,17 +206,17 @@
     <MobileMore
       {demoMode}
       jobs={$jobs.data ?? []}
+      jobsLoading={$jobs.isPending}
+      jobsError={$jobs.isError}
       rules={$rules.data ?? []}
       bank={$bank.data ?? { accounts: [], transactions: [] }}
       {navigate}
       {api}
+      {openConnector}
     />
   {:else if mobileView === "data-sources"}
     <div class="grid min-w-0 gap-4">
-      <section
-        aria-label="資料來源頁標題"
-        class="hidden min-w-0 md:block"
-      >
+      <section aria-label="資料來源頁標題" class="hidden min-w-0 md:block">
         <div>
           <h2 class="text-2xl font-bold tracking-tight">資料來源與連接器</h2>
           <p class="mt-1 text-sm text-muted-foreground">
@@ -190,7 +240,7 @@
               jobs={$jobs.data ?? []}
               compact
               compactCard
-              selected={selectedConnector === source.id}
+              selected={activeConnector === source.id}
               onConfigure={() => selectConnector(source.id)}
             />
           {/each}
@@ -200,9 +250,9 @@
           aria-label="連接器詳情"
           class="min-h-[520px] min-w-0 rounded-xl border border-border bg-card p-5 shadow-xs"
         >
-          {#if selectedConnector}
+          {#if activeConnector}
             {@const selectedSource = sources.find(
-              (source) => source.id === selectedConnector,
+              (source) => source.id === activeConnector,
             )}
             <div class="mb-4 flex items-start justify-between gap-3">
               <div>
@@ -216,12 +266,12 @@
                 onclick={() => (selectedConnector = null)}>關閉</button
               >
             </div>
-            {#key selectedConnector}<ConnectorPanel
+            {#key activeConnector}<ConnectorPanel
                 {api}
-                connectorId={selectedConnector}
+                connectorId={activeConnector}
                 {demoMode}
                 title={selectedSource?.title ?? "連接器"}
-                fields={connectorFields[selectedConnector]}
+                fields={connectorFields[activeConnector]}
                 embedded
               />{/key}
           {:else}
@@ -242,25 +292,31 @@
         class="grid min-w-0 gap-3 sm:grid-cols-2 md:hidden"
       >
         {#each sources as source (source.id)}
-          <SourceCard
-            {api}
-            {...source}
-            id={source.id}
-            jobs={$jobs.data ?? []}
-            selected={selectedConnector === source.id}
-            onConfigure={() => selectConnector(source.id)}
+          <div
+            class={`min-w-0 scroll-mt-24 ${activeConnector === source.id ? "sm:col-span-2" : ""}`}
+            data-connector-settings={source.id}
+            use:scrollSelectedConnector={activeConnector === source.id}
           >
-            {#if selectedConnector === source.id}
-              {#key source.id}<ConnectorPanel
-                  {api}
-                  connectorId={source.id}
-                  {demoMode}
-                  title={source.title}
-                  fields={connectorFields[source.id]}
-                  embedded
-                />{/key}
-            {/if}
-          </SourceCard>
+            <SourceCard
+              {api}
+              {...source}
+              id={source.id}
+              jobs={$jobs.data ?? []}
+              selected={activeConnector === source.id}
+              onConfigure={() => selectConnector(source.id)}
+            >
+              {#if activeConnector === source.id}
+                {#key source.id}<ConnectorPanel
+                    {api}
+                    connectorId={source.id}
+                    {demoMode}
+                    title={source.title}
+                    fields={connectorFields[source.id]}
+                    embedded
+                  />{/key}
+              {/if}
+            </SourceCard>
+          </div>
         {/each}
       </section>
     </div>
@@ -323,12 +379,9 @@
         <div>
           <h2 class="text-2xl font-bold tracking-tight">匯率</h2>
           <p class="mt-1 text-sm text-muted-foreground">
-            管理資產與活動使用的換算基準。
+            查看資產與活動使用的換算基準，必要時手動更新。
           </p>
         </div>
-        <span class="rounded-lg bg-steel px-4 py-2 text-sm font-bold text-white"
-          >更新匯率</span
-        >
       </div>
 
       <section
@@ -342,18 +395,18 @@
         </div>
         <div class="rounded-xl border border-border bg-card p-4 shadow-xs">
           <p class="text-sm font-semibold text-muted-foreground">資料來源</p>
-          <p class="mt-2 text-lg font-bold">手動設定</p>
-          <p class="mt-1 text-sm text-muted-foreground">以設定值換算</p>
+          <p class="mt-2 text-lg font-bold">ExchangeRate-API</p>
+          <p class="mt-1 text-sm text-muted-foreground">手動點擊更新</p>
         </div>
         <div class="rounded-xl bg-muted p-4">
-          <p class="text-sm font-semibold text-muted-foreground">自訂匯率</p>
+          <p class="text-sm font-semibold text-muted-foreground">支援幣別</p>
           <p class="mt-2 text-lg font-bold">{$rates.data?.length ?? 0} 筆</p>
-          <p class="mt-1 text-sm font-semibold text-steel">可在下方編輯</p>
+          <p class="mt-1 text-sm font-semibold text-steel">USD · JPY · EUR</p>
         </div>
       </section>
 
       <div class="hidden md:block">
-        <ExchangeRatesPanel {api} variant="desktop" />
+        <ExchangeRatesPanel {api} {demoMode} variant="desktop" />
       </div>
       <aside
         class="hidden rounded-lg bg-muted p-3 text-sm text-muted-foreground md:block"
@@ -361,7 +414,7 @@
         匯率僅用於資產總覽與統計換算，不會變更原始交易幣別或金額。
       </aside>
       <div class="md:hidden">
-        <ExchangeRatesPanel {api} />
+        <ExchangeRatesPanel {api} {demoMode} />
       </div>
     </div>
   {:else if mobileView === "classification-rules"}
@@ -370,12 +423,9 @@
         <div>
           <h2 class="text-2xl font-bold tracking-tight">分類規則</h2>
           <p class="mt-1 text-sm text-muted-foreground">
-            依照優先順序，自動為銀行交易套用分類與計算設定。
+            管理自訂分類，也會自動處理帳戶互轉、信用卡年費減免與發票配對。
           </p>
         </div>
-        <span class="rounded-lg bg-steel px-4 py-2 text-sm font-bold text-white"
-          >＋ 新增規則</span
-        >
       </div>
 
       <section
@@ -383,11 +433,11 @@
         class="hidden min-w-0 gap-3 md:grid md:grid-cols-2"
       >
         <div class="rounded-xl border border-border bg-card p-3.5 shadow-xs">
-          <p class="text-sm font-semibold text-muted-foreground">規則總數</p>
-          <p class="mt-1 text-lg font-bold">{$rules.data?.length ?? 0}</p>
+          <p class="text-sm font-semibold text-muted-foreground">自訂規則</p>
+          <p class="mt-1 text-lg font-bold">{customRuleCount}</p>
         </div>
         <div class="rounded-xl border border-border bg-card p-3.5 shadow-xs">
-          <p class="text-sm font-semibold text-muted-foreground">已啟用</p>
+          <p class="text-sm font-semibold text-muted-foreground">已啟用自訂</p>
           <p class="mt-1 text-lg font-bold text-moss">{enabledRuleCount}</p>
         </div>
       </section>
@@ -443,32 +493,81 @@
         class="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_340px]"
       >
         <div
-          class={`min-w-0 rounded-xl border bg-card p-5 shadow-xs ${needsAction ? "border-coral/70 border-l-4" : "border-border"}`}
+          class={`min-w-0 rounded-xl border bg-card p-5 shadow-xs ${needsAction ? "border-coral/70 border-l-4" : pendingSources ? "border-amber-200 border-l-4" : "border-border"}`}
         >
           <div class="flex items-center justify-between gap-3">
             <p
-              class={`text-sm font-semibold ${needsAction ? "text-coral" : "text-moss"}`}
+              class={`text-sm font-semibold ${needsAction ? "text-coral" : pendingSources ? "text-amber-700" : syncJobsState === "error" ? "text-coral" : "text-muted-foreground"}`}
             >
-              {needsAction ? `需要處理 · ${needsAction}` : "資料同步狀態"}
+              {#if syncJobsState === "loading"}
+                同步狀態載入中
+              {:else if syncJobsState === "error"}
+                同步狀態暫時無法取得
+              {:else if needsAction}
+                需要處理 · {needsAction}
+              {:else if pendingSources}
+                等待首次同步 · {pendingSources}
+              {:else if configuredSources.length === 0}
+                尚未設定資料來源
+              {:else}
+                資料同步狀態
+              {/if}
             </p>
-            <span class="text-sm font-semibold text-muted-foreground">
-              {needsAction ? "影響資料更新" : "目前正常"}
+            <span
+              class={`text-sm font-semibold ${needsAction || syncJobsState === "error" ? "text-coral" : pendingSources ? "text-amber-700" : "text-muted-foreground"}`}
+            >
+              {#if syncJobsState === "loading"}
+                載入中…
+              {:else if syncJobsState === "error"}
+                無法載入
+              {:else if needsAction}
+                影響資料更新
+              {:else if pendingSources}
+                等待同步
+              {:else if configuredSources.length === 0}
+                尚未設定
+              {:else}
+                目前正常
+              {/if}
             </span>
           </div>
           <h2 class="mt-2 text-xl font-bold">
-            {actionSource?.title ??
-              `${healthySources} / ${sources.length} 來源正常`}
+            {#if syncJobsState === "loading"}
+              正在載入同步狀態…
+            {:else if syncJobsState === "error"}
+              無法載入同步狀態
+            {:else if needsAction}
+              {actionSource?.title ?? "資料來源需要處理"}
+            {:else if pendingSources}
+              {pendingSources} 個資料來源等待首次同步
+            {:else if configuredSources.length}
+              {healthySources.length} / {configuredSources.length} 已設定來源正常
+            {:else}
+              尚未設定資料來源
+            {/if}
           </h2>
           <p class="mt-1 text-sm text-muted-foreground">
-            {needsAction
-              ? "完成重新驗證後即可恢復自動同步。"
-              : "所有連接器都能正常同步。"}
+            {#if syncJobsState === "loading"}
+              請稍候，正在讀取資料來源狀態。
+            {:else if syncJobsState === "error"}
+              無法確認資料來源狀態，請稍後再試。
+            {:else if needsAction}
+              查看來源的錯誤說明，重試同步或完成必要的驗證。
+            {:else if pendingSources}
+              這些來源尚未完成第一次同步，完成後才會列入正常來源。
+            {:else if configuredSources.length}
+              所有已設定連接器都能正常同步。
+            {:else}
+              設定資料來源後即可開始同步。
+            {/if}
           </p>
-          <button
-            class="mt-4 rounded-lg bg-steel px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-steel/90"
-            onclick={() => navigate("data-sources")}
-            >{needsAction ? "查看連接器" : "管理資料來源"}</button
-          >
+          {#if syncJobsState === "ready"}
+            <button
+              class="mt-4 rounded-lg bg-steel px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-steel/90"
+              onclick={() => navigate("data-sources")}
+              >{needsAction ? "查看連接器" : "管理資料來源"}</button
+            >
+          {/if}
         </div>
 
         <div
@@ -480,17 +579,29 @@
               資料健康度
             </p>
             <span
-              class={`text-sm font-semibold ${needsAction ? "text-coral" : "text-moss"}`}
-              >{needsAction ? "需要處理" : "大致正常"}</span
+              class={`text-sm font-semibold ${needsAction || syncJobsState === "error" ? "text-coral" : pendingSources ? "text-amber-700" : "text-muted-foreground"}`}
+              >{#if syncJobsState === "loading"}載入中…{:else if syncJobsState === "error"}無法載入{:else if needsAction}需要處理{:else if pendingSources}等待首次同步{:else if configuredSources.length === 0}尚未設定{:else}大致正常{/if}</span
             >
           </div>
           <p class="mt-2 text-3xl font-bold">
-            {healthySources} / {sources.length}
+            {#if syncJobsState !== "ready"}
+              —
+            {:else if configuredSources.length === 0}
+              尚未設定
+            {:else}
+              {healthySources.length} / {configuredSources.length}
+            {/if}
           </p>
           <p class="mt-1 text-sm text-muted-foreground">
-            {inheritedJobCount} 個排程啟用 · {latestSuccessAt
-              ? `最近成功 ${formatDateTime(latestSuccessAt)}`
-              : "尚無成功紀錄"}
+            {#if syncJobsState === "loading"}
+              正在讀取資料來源狀態。
+            {:else if syncJobsState === "error"}
+              無法取得資料來源狀態。
+            {:else}
+              {inheritedJobCount} 個排程啟用 · {latestSuccessAt
+                ? `最近成功 ${formatDateTime(latestSuccessAt)}`
+                : "尚無成功紀錄"}
+            {/if}
           </p>
         </div>
       </section>
@@ -518,7 +629,7 @@
                 jobs={$jobs.data ?? []}
                 compact
                 selected={false}
-                onConfigure={() => navigate("data-sources")}
+                onConfigure={() => openConnector(source.id)}
               />
             {/each}
           </div>
@@ -569,7 +680,7 @@
             {ratesSummary}
           </p>
           <span class="mt-4 block text-sm font-semibold text-steel"
-            >開啟設定 →</span
+            >查看匯率 →</span
           >
         </button>
         <button

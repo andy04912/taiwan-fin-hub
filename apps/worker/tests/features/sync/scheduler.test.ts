@@ -5,6 +5,9 @@ import type { Env } from "../../../src/platform/env";
 
 const mocks = vi.hoisted(() => ({
   acquireSyncJobLock: vi.fn(),
+  beginActivityRun: vi.fn(),
+  cancelQueuedEinvoiceSyncRun: vi.fn(),
+  cancelQueuedTdccSyncRun: vi.fn(),
   claimCompletedDefaultScheduleBatch: vi.fn(),
   completeSyncJob: vi.fn(),
   ensureDefaultScheduleBatch: vi.fn(),
@@ -17,9 +20,29 @@ const mocks = vi.hoisted(() => ({
   releaseSyncJobLock: vi.fn(),
   safelySendScheduledSyncSummary: vi.fn(),
   safelySendSyncNotification: vi.fn(),
+  startEinvoiceSyncRun: vi.fn(),
+  startTdccSyncRun: vi.fn(),
   startSyncLockHeartbeat: vi.fn(),
+  syncCathaybk: vi.fn(),
   syncEsun: vi.fn(),
+  syncMegabank: vi.fn(),
   syncTaishin: vi.fn(),
+  syncSkbank: vi.fn(),
+  syncNextbank: vi.fn(),
+}));
+
+vi.mock("../../../src/features/sync/einvoice-sync-service", () => ({
+  cancelQueuedEinvoiceSyncRun: mocks.cancelQueuedEinvoiceSyncRun,
+  startEinvoiceSyncRun: mocks.startEinvoiceSyncRun,
+}));
+
+vi.mock("../../../src/features/sync/tdcc-sync-service", () => ({
+  cancelQueuedTdccSyncRun: mocks.cancelQueuedTdccSyncRun,
+  startTdccSyncRun: mocks.startTdccSyncRun,
+}));
+
+vi.mock("../../../src/features/sync/activity-detail-repository", () => ({
+  beginActivityRun: mocks.beginActivityRun,
 }));
 
 vi.mock("@taiwan-fin-hub/db", () => ({
@@ -34,13 +57,37 @@ vi.mock("../../../src/features/sync/service", () => ({
   canonicalSyncLockRowId: (connectorId: string) => `${connectorId}:all`,
   isUserActionError: () => false,
   NeedsUserActionError: class NeedsUserActionError extends Error {},
-  safeErrorMessage: (error: unknown) => String(error),
+  prepareSinopacCaptchaSession: vi.fn(),
+  prepareHncbCaptchaSession: vi.fn(),
+  prepareKgibankCaptchaSession: vi.fn(),
+  prepareTaishinCaptchaSession: vi.fn(),
+  prepareObankCaptchaSession: vi.fn(),
+  prepareMegabankCaptchaSession: vi.fn(),
+  prepareNextbankCaptchaSession: vi.fn(),
+  syncNextbank: mocks.syncNextbank,
+  prepareFirstbankCaptchaSession: vi.fn(),
+  prepareRakutenCaptchaSession: vi.fn(),
+  safeErrorLogDetails: (error: unknown) => ({
+    errorName: error instanceof Error ? error.name : typeof error,
+    ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
+  }),
+  safeErrorMessage: (error: unknown) =>
+    error instanceof Error && error.message.trim()
+      ? error.message.trim()
+      : "同步失敗，但未取得錯誤原因。",
   startSyncLockHeartbeat: mocks.startSyncLockHeartbeat,
-  syncCathaybk: vi.fn(),
+  syncCathaybk: mocks.syncCathaybk,
   syncEinvoice: vi.fn(),
   syncEsun: mocks.syncEsun,
   syncSinopac: vi.fn(),
+  syncObank: vi.fn(),
+  syncMegabank: mocks.syncMegabank,
+  syncFirstbank: vi.fn(),
+  syncHncb: vi.fn(),
+  syncRakuten: vi.fn(),
+  syncKgibank: vi.fn(),
   syncTaishin: mocks.syncTaishin,
+  syncSkbank: mocks.syncSkbank,
   syncTdcc: vi.fn(),
   SYNC_LOCK_LEASE_MS: 30 * 60 * 1000,
 }));
@@ -92,8 +139,11 @@ function syncJob(
   };
 }
 
-function env() {
-  return { DB: {} as D1Database } as Env;
+function env(send = vi.fn().mockResolvedValue(undefined)) {
+  return {
+    DB: {} as D1Database,
+    SYNC_QUEUE: { send } as unknown as Queue,
+  } as Env;
 }
 
 beforeEach(() => {
@@ -103,15 +153,55 @@ beforeEach(() => {
   mocks.completeSyncJob.mockResolvedValue(undefined);
   mocks.releaseSyncJobLock.mockResolvedValue(undefined);
   mocks.startSyncLockHeartbeat.mockReturnValue(vi.fn());
+  mocks.startEinvoiceSyncRun.mockResolvedValue({
+    run: { id: "einvoice-run-1" },
+    created: true,
+  });
+  mocks.cancelQueuedEinvoiceSyncRun.mockResolvedValue(undefined);
+  mocks.startTdccSyncRun.mockResolvedValue({
+    run: { id: "tdcc-run-1" },
+    created: true,
+  });
+  mocks.cancelQueuedTdccSyncRun.mockResolvedValue(undefined);
   mocks.syncEsun.mockResolvedValue({
     connectorId: "esun",
     scope: "all",
     records: 1,
+    newRecords: {
+      invoices: 0,
+      bankTransactions: 1,
+      investmentTransactions: 0,
+    },
   });
   mocks.syncTaishin.mockResolvedValue({
     connectorId: "taishin",
     scope: "all",
     records: 2,
+    newRecords: {
+      invoices: 0,
+      bankTransactions: 2,
+      investmentTransactions: 0,
+    },
+  });
+  mocks.syncCathaybk.mockResolvedValue({
+    connectorId: "cathaybk",
+    scope: "all",
+    records: 2,
+    newRecords: {
+      invoices: 0,
+      bankTransactions: 2,
+      investmentTransactions: 0,
+    },
+  });
+  mocks.syncMegabank.mockResolvedValue({
+    connectorId: "megabank",
+    scope: "all",
+    records: 2,
+    newRecords: {
+      invoices: 0,
+      bankTransactions: 1,
+      investmentTransactions: 0,
+    },
   });
   mocks.recordDefaultScheduleBatchResult.mockResolvedValue(true);
   mocks.claimCompletedDefaultScheduleBatch.mockResolvedValue([
@@ -120,6 +210,29 @@ beforeEach(() => {
 });
 
 describe("scheduled sync rounds", () => {
+  it("persists a fallback and logs diagnostic details for an empty error", async () => {
+    const job = syncJob("custom");
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(job);
+    mocks.syncEsun.mockRejectedValueOnce(new Error(""));
+
+    await runSchedulerTick(env(), scheduledController);
+
+    expect(mocks.failSyncJob).toHaveBeenCalledWith(expect.anything(), job, {
+      status: "failed",
+      errorMessage: "同步失敗，但未取得錯誤原因。",
+    });
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+      event: "sync_run_failed",
+      connectorId: "esun",
+      status: "failed",
+      message: "同步失敗，但未取得錯誤原因。",
+      errorName: "Error",
+      stack: expect.stringContaining("Error"),
+    });
+  });
+
   it("records a default-round result before releasing the connector lock", async () => {
     const order: string[] = [];
     const job = syncJob();
@@ -159,8 +272,14 @@ describe("scheduled sync rounds", () => {
       expect.anything(),
       {
         batchId: "default:new-round",
+        runId: expect.any(String),
         jobId: job.id,
         notification: { connectorId: "esun", status: "success" },
+        newRecords: {
+          invoices: 0,
+          bankTransactions: 1,
+          investmentTransactions: 0,
+        },
       },
     );
   });
@@ -195,6 +314,153 @@ describe("scheduled sync rounds", () => {
     expect(mocks.syncTaishin).toHaveBeenCalledWith(
       expect.anything(),
       "scheduled",
+      {},
+    );
+  });
+
+  it("dispatches a Nextbank schedule without reusing a manual CAPTCHA", async () => {
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(syncJob("custom", "nextbank"));
+    mocks.syncNextbank.mockResolvedValueOnce({
+      success: true,
+      connectorId: "nextbank",
+      scope: "all",
+      records: 0,
+      newRecords: {
+        invoices: 0,
+        bankTransactions: 0,
+        investmentTransactions: 0,
+      },
+      cursorUpdated: true,
+    });
+    await runSchedulerTick(env(), scheduledController);
+    expect(mocks.syncNextbank).toHaveBeenCalledWith(
+      expect.anything(),
+      "scheduled",
+      {},
+    );
+  });
+
+  it("dispatches a scheduled Cathay job without OTP overrides", async () => {
+    const job = syncJob("custom", "cathaybk");
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(job);
+
+    await runSchedulerTick(env(), scheduledController);
+
+    expect(mocks.syncCathaybk).toHaveBeenCalledWith(
+      expect.anything(),
+      "scheduled",
+      {},
+    );
+  });
+
+  it("dispatches a scheduled Mega Bank job without manual CAPTCHA", async () => {
+    const job = syncJob("custom", "megabank");
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(job);
+
+    await runSchedulerTick(env(), scheduledController);
+
+    expect(mocks.syncMegabank).toHaveBeenCalledWith(
+      expect.anything(),
+      "scheduled",
+      {},
+    );
+  });
+
+  it("starts and enqueues a newly-created custom e-invoice durable run", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const job = syncJob("custom", "einvoice");
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(job);
+
+    await expect(
+      runSchedulerTick(env(send), scheduledController),
+    ).resolves.toBe(true);
+
+    expect(mocks.startEinvoiceSyncRun).toHaveBeenCalledWith(expect.anything(), {
+      trigger: "scheduled",
+    });
+    expect(send).toHaveBeenCalledWith({
+      type: "run-einvoice-chunk",
+      runId: "einvoice-run-1",
+    });
+  });
+
+  it("does not enqueue a reused custom e-invoice run", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const job = syncJob("custom", "einvoice");
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(job);
+    mocks.startEinvoiceSyncRun.mockResolvedValueOnce({
+      run: { id: "einvoice-running" },
+      created: false,
+    });
+
+    await expect(
+      runSchedulerTick(env(send), scheduledController),
+    ).resolves.toBe(true);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(mocks.cancelQueuedEinvoiceSyncRun).not.toHaveBeenCalled();
+  });
+
+  it("requeues a reused custom TDCC run", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const job = syncJob("custom", "tdcc");
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(job);
+    mocks.startTdccSyncRun.mockResolvedValueOnce({
+      run: { id: "tdcc-running" },
+      created: false,
+    });
+
+    await expect(
+      runSchedulerTick(env(send), scheduledController),
+    ).resolves.toBe(true);
+
+    expect(send).toHaveBeenCalledWith({
+      type: "run-tdcc-chunk",
+      runId: "tdcc-running",
+    });
+    expect(mocks.cancelQueuedTdccSyncRun).not.toHaveBeenCalled();
+  });
+
+  it("preserves the default batch ID when starting an e-invoice durable run", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const job = syncJob("inherit", "einvoice");
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue(null);
+    mocks.findNextDueSyncJob.mockResolvedValue(job);
+    mocks.ensureDefaultScheduleBatch.mockResolvedValue("default:einvoice");
+    mocks.findNextDefaultScheduleBatchJob.mockResolvedValue(job);
+
+    await expect(
+      runSchedulerTick(env(send), scheduledController),
+    ).resolves.toBe(true);
+
+    expect(mocks.startEinvoiceSyncRun).toHaveBeenCalledWith(expect.anything(), {
+      trigger: "scheduled",
+      scheduledBatchId: "default:einvoice",
+    });
+    expect(send).toHaveBeenCalledWith({
+      type: "run-einvoice-chunk",
+      runId: "einvoice-run-1",
+    });
+  });
+
+  it("reports whether a job was processed so the queue can continue", async () => {
+    const job = syncJob();
+    mocks.findOpenDefaultScheduleBatchId.mockResolvedValue("default:round");
+    mocks.findNextDefaultScheduleBatchJob.mockResolvedValue(job);
+
+    await expect(runSchedulerTick(env(), scheduledController)).resolves.toBe(
+      true,
+    );
+
+    mocks.acquireSyncJobLock.mockResolvedValue(false);
+    await expect(runSchedulerTick(env(), scheduledController)).resolves.toBe(
+      false,
     );
   });
 });

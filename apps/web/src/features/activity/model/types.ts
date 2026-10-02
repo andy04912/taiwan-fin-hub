@@ -1,24 +1,5 @@
-export interface ActivityItem {
-  id: string;
-  source: "bank" | "card" | "investment" | "invoice";
-  date: string;
-  title: string;
-  subtitle: string;
-  institutionName?: string;
-  accountName?: string;
-  amount?: number;
-  currency: string;
-  category: string;
-  categoryId?: string;
-  classificationPattern?: string;
-  classificationSource?: "override" | "user_rule" | "system_rule" | "fallback";
-  classificationRuleId?: string;
-  transactionId?: string;
-  excludedFromCalculation?: boolean;
-  invoiceId?: string;
-  invoiceAmount?: number;
-  status: string;
-}
+import type { ActivityItem } from "@taiwan-fin-hub/core";
+export type { ActivityItem } from "@taiwan-fin-hub/core";
 
 export interface PendingCategoryUpdate {
   item: ActivityItem;

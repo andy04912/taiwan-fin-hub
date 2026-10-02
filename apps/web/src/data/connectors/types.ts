@@ -1,6 +1,6 @@
-import type { ConnectorId } from "@taiwan-fin-hub/core";
+import type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/core";
 
-export type { ConnectorId } from "@taiwan-fin-hub/core";
+export type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/core";
 
 export type SyncTarget = "default" | "investments" | "bank" | "trades";
 
@@ -11,11 +11,15 @@ export interface ConnectorSettings {
   publicConfig?: Record<string, unknown> | null;
   credentialsComplete?: boolean;
   sessionAvailable?: boolean;
+  verificationPending?: boolean;
+  verificationChannel?: "email" | "sms" | null;
+  verificationExpiresAt?: string | null;
 }
 
 export interface SyncJobRow {
   id: string;
   connectorId: ConnectorId;
+  configured: boolean;
   scope: string;
   enabled: boolean;
   intervalMinutes: number;
@@ -43,9 +47,9 @@ export interface SyncScheduleSettings {
   updatedAt: string;
 }
 
-export interface ConnectorField {
-  key: string;
+export interface ConnectorField<TKey extends string = string> {
+  key: TKey;
   label: string;
-  type: "text" | "password" | "number" | "checkbox";
+  type: "text" | "password" | "number";
   placeholder?: string;
 }

@@ -100,7 +100,15 @@ export function formatBankAccountName(account: {
 export function bankAccountLast5(sourceId: string) {
   const settlement = sourceId.match(/^settlement:[^:]+:([^:]+)/);
   const esun = sourceId.match(/^bank:esun:([^:]+)/);
-  const digits = (settlement?.[1] ?? esun?.[1] ?? "").replace(/\D/g, "");
+  const skbank = sourceId.match(/^bank:skbank:([^:]+)/);
+  const firstbank = sourceId.match(/^bank:firstbank:([^:]+)/);
+  const digits = (
+    settlement?.[1] ??
+    esun?.[1] ??
+    skbank?.[1] ??
+    firstbank?.[1] ??
+    ""
+  ).replace(/\D/g, "");
   return digits ? digits.slice(-5) : undefined;
 }
 
@@ -128,6 +136,22 @@ export function sumAccountsByCurrency(
 
 export function rateMap(rates: ExchangeRate[] | undefined) {
   return Object.fromEntries((rates ?? []).map((r) => [r.currency, r.rateTwd]));
+}
+
+export function missingExchangeRateCurrencies(
+  amounts: ReadonlyArray<CurrencyAmount>,
+  rates: Readonly<Record<string, number>>,
+) {
+  return [
+    ...new Set(
+      amounts
+        .filter(
+          ({ currency, amount }) =>
+            amount > 0 && currency !== "TWD" && rates[currency] == null,
+        )
+        .map(({ currency }) => currency),
+    ),
+  ].sort();
 }
 
 export function transactionValueTwd(

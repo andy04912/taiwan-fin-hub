@@ -20,6 +20,9 @@ export const queryKeys = {
   exchangeRates: ["exchange-rates"] as const,
   netWorthHistory: ["netWorthHistory"] as const,
   syncJobs: ["sync-jobs"] as const,
+  latestSyncReport: ["sync-reports", "latest"] as const,
+  syncReportActivities: (batchId: string) =>
+    ["sync-reports", batchId, "activities"] as const,
   syncSchedule: ["sync-schedule"] as const,
   notifications: ["notifications"] as const,
   classificationCategories: ["classification-categories"] as const,

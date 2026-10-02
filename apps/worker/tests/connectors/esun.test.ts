@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildEsunCreditTimelinePages,
+  readEsunCardBalances,
+  type EsunSnapshot,
+} from "../../src/connectors/esun-portal";
+import {
+  appendEsunDepositTransactions,
+  esunCreditBalanceAccountId,
+  normalizeEsunAuthorizedAt,
   normalizeEsunTimelineTransactions,
   type EsunTimelinePage,
   type EsunTimelineTransaction,
@@ -32,7 +40,40 @@ function transaction(
   };
 }
 
+describe("E.SUN bill payment status", () => {
+  it.each([
+    [true, true],
+    [false, undefined],
+  ])("maps creditCardFeePaid %s to %s", (overviewPaid, isPaid) => {
+    const snapshot: EsunSnapshot = {
+      hasCreditCard: true,
+      cardOverview: {
+        resultCode: "0000",
+        resultBody: { creditCardFeePaid: overviewPaid },
+      },
+      billSummary: { body: { billInfo: {} } },
+      billPeriod: "202608",
+      realtime: {},
+      creditHistory: [],
+      twDeposits: [],
+      frDeposits: [],
+    };
+
+    expect(readEsunCardBalances(snapshot).isPaid).toBe(isPaid);
+  });
+});
+
 describe("E.SUN credit card timeline normalization", () => {
+  it("uses the physical card for a single card and keeps an aggregate for multiple cards", () => {
+    expect(esunCreditBalanceAccountId(["credit:esun:1204"])).toBe(
+      "credit:esun:1204",
+    );
+    expect(
+      esunCreditBalanceAccountId(["credit:esun:1204", "credit:esun:9876"]),
+    ).toBe("credit:esun:main");
+    expect(esunCreditBalanceAccountId([])).toBe("credit:esun:main");
+  });
+
   it("collapses pending and posted lifecycle copies into one stable transaction", () => {
     const rows = normalizeEsunTimelineTransactions([
       page([transaction("未入帳"), transaction("已入帳")]),
@@ -45,7 +86,7 @@ describe("E.SUN credit card timeline normalization", () => {
     expect(rows[0]).toMatchObject({
       amount: -252,
       status: "posted",
-      authorizedAt: "2026-07-05T00:00:00.000Z",
+      authorizedAt: "2026-07-05",
       postedDate: "2026-07-05T00:00:00.000Z",
     });
     expect((rows[0].raw as EsunTimelineTransaction).acfg).toBe("已入帳");
@@ -119,10 +160,151 @@ describe("E.SUN credit card timeline normalization", () => {
 
     expect(rows).toEqual([
       expect.objectContaining({
-        sourceId: "2026-07-05T00:00:00.000Z:credit:esun:1204:全支付﹘全聯:252:TWD:1",
+        sourceId:
+          "2026-07-05T00:00:00.000Z:credit:esun:1204:全支付﹘全聯:252:TWD:1",
         status: "posted",
-        authorizedAt: "2026-07-05T00:00:00.000Z",
+        authorizedAt: "2026-07-05",
         postedDate: "2026-07-07T00:00:00.000Z",
+      }),
+    ]);
+  });
+
+  it("keeps negative history amounts as refunds instead of purchases", () => {
+    const rows = normalizeEsunTimelineTransactions(
+      buildEsunCreditTimelinePages({
+        realtime: { body: { transList: [] } },
+        creditHistory: [
+          {
+            body: {
+              transList: [
+                {
+                  year: "2026",
+                  month: "09",
+                  transDetailList: [
+                    {
+                      merchantName: "優食台灣股份有限公司",
+                      cardNo: "4751-XXXX-XXXX-0412",
+                      transMonthDay: "0906",
+                      paymentAmount: 199,
+                      paymentCurrency: "TWD",
+                      statusName: "已入帳",
+                    },
+                    {
+                      merchantName: "優食台灣股份有限公司",
+                      cardNo: "4751-XXXX-XXXX-0412",
+                      transMonthDay: "0906",
+                      paymentAmount: -199,
+                      paymentCurrency: "TWD",
+                      statusName: "已入帳",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(rows.map((row) => row.amount).sort((a, b) => a - b)).toEqual([
+      -199, 199,
+    ]);
+  });
+
+  it("maps a realtime authorization onto the posted copy without changing its source id", () => {
+    const rows = normalizeEsunTimelineTransactions(
+      buildEsunCreditTimelinePages({
+        realtime: {
+          body: {
+            transList: [
+              {
+                year: "2026",
+                month: "07",
+                transDetailList: [
+                  {
+                    merchantName: "全支付﹘全聯",
+                    cardNo: "****1204",
+                    transTime: "07/05 13:04:05",
+                    paymentAmount: 252,
+                    paymentCurrency: "TWD",
+                    positiveTrans: true,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        creditHistory: [
+          {
+            body: {
+              transList: [
+                {
+                  year: "2026",
+                  month: "07",
+                  transDetailList: [
+                    {
+                      merchantName: "全支付﹘全聯",
+                      cardNo: "****1204",
+                      transMonthDay: "0705",
+                      postingMonthDay: "0707",
+                      paymentAmount: 252,
+                      paymentCurrency: "TWD",
+                      statusName: "已入帳",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        sourceId:
+          "2026-07-05T00:00:00.000Z:credit:esun:1204:全支付﹘全聯:252:TWD:1",
+        status: "posted",
+        authorizedAt: "2026-07-05T13:04:05+08:00",
+        postedDate: "2026-07-07T00:00:00.000Z",
+      }),
+    ]);
+  });
+
+  it("merges a same-name realtime record into the unposted history copy", () => {
+    const month = (detail: Record<string, unknown>) => ({
+      body: {
+        transList: [{ year: "2026", month: "09", transDetailList: [detail] }],
+      },
+    });
+    const rows = normalizeEsunTimelineTransactions(
+      buildEsunCreditTimelinePages({
+        realtime: month({
+          merchantName: "連加＊金韓食",
+          cardNo: "****1204",
+          transTime: "09/20 14:36:00",
+          paymentAmount: 2178,
+          positiveTrans: true,
+        }),
+        creditHistory: [
+          month({
+            merchantName: "連加＊金韓食",
+            cardNo: "****1204",
+            transMonthDay: "0920",
+            paymentAmount: 2178,
+            statusName: "未入帳",
+          }),
+        ],
+      }),
+    );
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        sourceId:
+          "2026-09-20T00:00:00.000Z:credit:esun:1204:連加＊金韓食:2178:TWD:1",
+        status: "pending",
+        authorizedAt: "2026-09-20T14:36:00+08:00",
+        raw: expect.objectContaining({ esunFeed: "history" }),
       }),
     ]);
   });
@@ -138,9 +320,48 @@ describe("E.SUN credit card timeline normalization", () => {
     ]);
 
     expect(rows).toHaveLength(2);
-    expect(rows.map(({ accountId, status }) => ({ accountId, status }))).toEqual([
+    expect(
+      rows.map(({ accountId, status }) => ({ accountId, status })),
+    ).toEqual([
       { accountId: "credit:esun:1204", status: "posted" },
       { accountId: "credit:esun:9876", status: "posted" },
     ]);
+  });
+});
+
+describe("E.SUN deposit transaction timestamps", () => {
+  it("adds a Taiwan offset while keeping the legacy source identity", () => {
+    const target: Parameters<typeof appendEsunDepositTransactions>[0] = [];
+
+    appendEsunDepositTransactions(
+      target,
+      [
+        {
+          txDate: "2026/07/05",
+          txTime: "00:00:00",
+          amt: "252",
+          chc: "全支付",
+          balance: "1000",
+          showCrFlag: "show",
+        },
+      ],
+      "bank:esun:1234",
+      "TWD",
+    );
+
+    expect(target[0]).toMatchObject({
+      authorizedAt: "2026-07-05T00:00:00+08:00",
+      postedDate: "2026-07-05T00:00:00.000Z",
+      sourceId: "2026-07-05T00:00:00.000Z:bank:esun:1234:全支付:252:1000:::1",
+    });
+  });
+
+  it("keeps a missing source time at date precision", () => {
+    expect(normalizeEsunAuthorizedAt("2026/07/05", undefined)).toBe(
+      "2026-07-05",
+    );
+    expect(normalizeEsunAuthorizedAt("2026/07/05", "25:00:00")).toBe(
+      "2026-07-05",
+    );
   });
 });

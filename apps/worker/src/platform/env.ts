@@ -1,7 +1,13 @@
 import type { ConnectorId } from "@taiwan-fin-hub/core";
 
+export type ScheduledSyncQueueMessage =
+  | { type: "run-next-scheduled-sync" }
+  | { type: "run-einvoice-chunk"; runId: string }
+  | { type: "run-tdcc-chunk"; runId: string };
+
 export interface Env {
   DB: D1Database;
+  SYNC_QUEUE: Queue<ScheduledSyncQueueMessage>;
   ASSETS: Fetcher;
   BROWSER: Fetcher;
   AI: Ai;
@@ -13,6 +19,9 @@ export interface Env {
   POLICY_AUD?: string;
   POLICY_AUDS?: string;
   DEMO_MODE?: string | boolean;
+  LOCAL_DEV_MODE?: string | boolean;
+  CTBC_API_RELAY_URL?: string;
+  CTBC_API_RELAY_TOKEN?: string;
 }
 
 export type Variables = {

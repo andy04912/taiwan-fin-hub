@@ -3,6 +3,7 @@ import {
   bankAccountLast5,
   formatBankAccountName,
   formatNumber,
+  missingExchangeRateCurrencies,
   normalizeFinancialDate,
   parseValidDate,
   rateMap,
@@ -17,6 +18,8 @@ describe("financial formatting helpers", () => {
   it("extracts the last five digits from supported bank source ids", () => {
     expect(bankAccountLast5("settlement:esun:1234567890")).toBe("67890");
     expect(bankAccountLast5("bank:esun:987654321")).toBe("54321");
+    expect(bankAccountLast5("bank:skbank:4321:hash")).toBe("4321");
+    expect(bankAccountLast5("bank:firstbank:12345:hash")).toBe("12345");
     expect(bankAccountLast5("other:account")).toBeUndefined();
   });
 
@@ -51,5 +54,21 @@ describe("financial formatting helpers", () => {
     expect(
       transactionValueTwd({ currency: "USD", amount: 10 } as never, rates),
     ).toBe(320);
+  });
+
+  it("reports missing rates only for positive foreign-currency amounts", () => {
+    expect(
+      missingExchangeRateCurrencies(
+        [
+          { currency: "HKD", amount: 0 },
+          { currency: "HKD", amount: 100 },
+          { currency: "HKD", amount: 200 },
+          { currency: "CNY", amount: -100 },
+          { currency: "USD", amount: 100 },
+          { currency: "TWD", amount: 100 },
+        ],
+        { USD: 32 },
+      ),
+    ).toEqual(["HKD"]);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  recognizeAlphanumericCaptcha,
   recognizeNumericCaptcha,
   recognizeValidateNumber,
   VALIDATE_NUMBER_MODEL,
@@ -59,14 +60,63 @@ describe("Gemma 4 validation number OCR", () => {
     ).rejects.toBeInstanceOf(ValidateNumberOcrError);
   });
 
-  it("maps Workers AI failures to a typed unavailable error", async () => {
-    const ai = {
-      run: vi.fn().mockRejectedValue(new Error("upstream timeout")),
-    } as unknown as Ai;
+  it("retries a Workers AI capacity error once and returns the recovered result", async () => {
+    const capacityError = Object.assign(new Error("AI unavailable"), {
+      internalCode: 3040,
+    });
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(capacityError)
+      .mockResolvedValueOnce({
+        choices: [{ message: { content: "575831" } }],
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await expect(
-      recognizeValidateNumber(ai, image, "image/jpeg"),
+      recognizeValidateNumber({ run } as unknown as Ai, image, "image/jpeg"),
+    ).resolves.toMatchObject({ number: "575831" });
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it("maps an exhausted Workers AI timeout to a localized unavailable error", async () => {
+    const run = vi.fn().mockRejectedValue(new Error("3046: Request timeout"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    await expect(
+      recognizeValidateNumber({ run } as unknown as Ai, image, "image/jpeg"),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message: "驗證碼辨識服務暫時逾時，請稍後重試。",
+      }),
+    );
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(error).toHaveBeenCalledWith(
+      "[ocr] Workers AI CAPTCHA recognition unavailable",
+      expect.any(Error),
+    );
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
+  it("does not retry a non-transient Workers AI failure", async () => {
+    const run = vi.fn().mockRejectedValue(new Error("Invalid model input"));
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    await expect(
+      recognizeValidateNumber({ run } as unknown as Ai, image, "image/jpeg"),
     ).rejects.toBeInstanceOf(ValidateNumberOcrUnavailableError);
+
+    expect(run).toHaveBeenCalledOnce();
+    error.mockRestore();
   });
 
   it("supports a connector-specified numeric captcha length", async () => {
@@ -80,6 +130,25 @@ describe("Gemma 4 validation number OCR", () => {
 
     expect(JSON.stringify(run.mock.calls[0]?.[1])).toContain(
       "exactly 4 digits",
+    );
+  });
+
+  it("accepts an exact case-sensitive alphanumeric CAPTCHA", async () => {
+    const run = vi.fn().mockResolvedValue({
+      choices: [{ message: { content: "A1b2" } }],
+    });
+
+    await expect(
+      recognizeAlphanumericCaptcha(
+        { run } as unknown as Ai,
+        image,
+        "image/png",
+        4,
+      ),
+    ).resolves.toMatchObject({ code: "A1b2" });
+
+    expect(JSON.stringify(run.mock.calls[0]?.[1])).toContain(
+      "case-sensitive ASCII letters or digits",
     );
   });
 });

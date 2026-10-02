@@ -45,7 +45,7 @@ function createDb() {
       {
         id: "transaction-next-taipei-day",
         postedDate: "2026-07-06T16:00:00.000Z",
-        authorizedAt: null,
+        authorizedAt: "2026-07-06T16:00:00.000Z",
         amount: 50,
         currency: "TWD",
         accountType: "credit",
@@ -55,19 +55,40 @@ function createDb() {
   const preferences = new Map<string, Preference>();
 
   const db = {
-    prepare(sql: string) {
+    prepare(query: string) {
+      const sql = query.replaceAll('"', "").toUpperCase();
       let values: unknown[] = [];
       return {
         bind(...nextValues: unknown[]) {
           values = nextValues;
           return this;
         },
+        async raw() {
+          if (
+            sql.includes("FROM INVOICE_TRANSACTION_PREFERENCES") &&
+            !sql.includes("INSERT") &&
+            !sql.includes("TRANSACTION_ID = ?")
+          ) {
+            return Array.from(preferences.values()).map((preference) => [
+              preference.invoiceId,
+              preference.transactionId,
+              preference.decision,
+              preference.createdAt,
+              preference.updatedAt,
+            ]);
+          }
+          const row = await this.first();
+          return row ? [Object.values(row)] : [];
+        },
         async first() {
-          if (sql.includes("FROM invoices"))
+          if (sql.includes("FROM INVOICES"))
             return invoices.get(String(values[0])) ?? null;
-          if (sql.includes("FROM bank_transactions"))
+          if (sql.includes("FROM BANK_TX") || sql.includes("BANK_TX."))
             return transactions.get(String(values[0])) ?? null;
-          if (sql.includes("WHERE transaction_id")) {
+          if (
+            sql.includes("INVOICE_TRANSACTION_PREFERENCES") &&
+            sql.includes("TRANSACTION_ID = ?")
+          ) {
             const linked = Array.from(preferences.values()).find(
               (preference) =>
                 preference.decision === "linked" &&
@@ -228,11 +249,9 @@ describe("activity invoice transaction mappings", () => {
     } as unknown as D1Database;
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const response = await api.request(
-      "/activity/invoice-mappings",
-      {},
-      { DB: db } as Env,
-    );
+    const response = await api.request("/activity/invoice-mappings", {}, {
+      DB: db,
+    } as Env);
 
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toEqual({

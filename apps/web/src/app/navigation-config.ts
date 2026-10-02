@@ -1,10 +1,11 @@
-import { BarChart3, FileText, History, Settings, Wallet } from "@lucide/svelte";
+import { BarChart3, History, Settings, Wallet } from "@lucide/svelte";
 import type { Component } from "svelte";
 import type { DetailView, MobileSettingsView, PrimaryView } from "./types";
 
 export interface NavigationItem {
   view: PrimaryView;
   label: string;
+  pageTitle?: string;
   shortLabel: string;
   description: string;
   icon: Component;
@@ -21,6 +22,7 @@ export const navItems: NavigationItem[] = [
   {
     view: "assets",
     label: "資產",
+    pageTitle: "資產清冊",
     shortLabel: "資產",
     description: "銀行、信用卡、投資與其他資產集中管理。",
     icon: Wallet,
@@ -31,13 +33,6 @@ export const navItems: NavigationItem[] = [
     shortLabel: "活動",
     description: "銀行、刷卡、投資與發票的統一時間軸。",
     icon: History,
-  },
-  {
-    view: "invoices",
-    label: "發票",
-    shortLabel: "發票",
-    description: "搜尋電子發票、商家與品項明細。",
-    icon: FileText,
   },
   {
     view: "settings",
@@ -58,8 +53,6 @@ export const detailLabels: Record<
   DetailView,
   { label: string; description: string }
 > = {
-  bank: { label: "銀行帳戶", description: "帳戶餘額、現金流與交易分類。" },
-  cards: { label: "信用卡", description: "信用卡帳戶、帳單與刷卡紀錄。" },
   investments: { label: "投資", description: "投資持倉與交易紀錄。" },
   "manual-assets": {
     label: "其他資產",
@@ -81,7 +74,7 @@ export const mobileSettingsLabels: Record<
   },
   "exchange-rates": {
     label: "匯率",
-    description: "管理資產換算使用的參考匯率。",
+    description: "查看資產換算使用的參考匯率。",
   },
   "classification-rules": {
     label: "分類規則",

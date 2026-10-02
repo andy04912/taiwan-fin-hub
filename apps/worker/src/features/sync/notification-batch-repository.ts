@@ -1,13 +1,31 @@
+import {
+  publishActivityRunStatement,
+  findUnfinishedActivityReport,
+} from "./activity-detail-repository";
+import { safelyMaterializeActivityReport } from "./activity-detail-service";
+import {
+  createDrizzle,
+  sanitizeDatabaseError,
+  syncJobs,
+  syncJobConfiguredJoin,
+  syncJobSelection,
+  connectorSettings,
+  scheduledSyncBatches,
+  scheduledSyncBatchResults,
+  einvoiceSyncRuns,
+} from "@taiwan-fin-hub/db";
+import { and, asc, eq, isNull, isNotNull, lt, ne, or, sql } from "drizzle-orm";
 import type {
   ConnectorId,
+  SyncNewRecordCounts,
   SyncNotificationStatus,
 } from "@taiwan-fin-hub/core";
 import type { SyncJobRow } from "@taiwan-fin-hub/db";
 import type { SyncNotificationEvent } from "../notifications/payload";
-
-type BatchRow = {
-  id: string;
-};
+import {
+  calculateCurrentFinancialSnapshot,
+  hasCompletedFinancialBaseline,
+} from "./report-repository";
 
 type BatchMemberRow = {
   job_id: string;
@@ -16,6 +34,7 @@ type BatchMemberRow = {
   last_status: SyncNotificationStatus | null;
   locked_until: string | null;
   lock_trigger: "manual" | "scheduled" | null;
+  configured_connector_id: string | null;
 };
 
 type BatchResultRow = {
@@ -31,30 +50,53 @@ export async function ensureDefaultScheduleBatch(db: D1Database) {
 
   await pruneClaimedDefaultScheduleBatches(db);
 
-  const jobs = await db
-    .prepare(
-      `SELECT id, connector_id
-       FROM sync_jobs
-       WHERE enabled = 1
-         AND schedule_mode = 'inherit'
-         AND (last_status IS NULL OR last_status != 'needs_user_action')
-       ORDER BY id ASC`,
+  const jobs = await createDrizzle(db)
+    .select({
+      id: syncJobs.id,
+      connector_id: sql<ConnectorId>`${syncJobs.connectorId}`,
+    })
+    .from(syncJobs)
+    .innerJoin(connectorSettings, syncJobConfiguredJoin)
+    .where(
+      and(
+        eq(syncJobs.enabled, 1),
+        eq(syncJobs.scheduleMode, "inherit"),
+        or(
+          isNull(syncJobs.lastStatus),
+          ne(syncJobs.lastStatus, "needs_user_action"),
+        ),
+      ),
     )
-    .all<{ id: string; connector_id: ConnectorId }>();
-  if (jobs.results.length === 0) return null;
+    .orderBy(asc(syncJobs.id))
+    .all()
+    .catch((error) => {
+      throw sanitizeDatabaseError(error);
+    });
+  if (jobs.length === 0) return null;
 
   const batchId = `default:${crypto.randomUUID()}`;
   const now = new Date().toISOString();
+  const snapshot = await calculateCurrentFinancialSnapshot(db);
+  const isBaseline = !(await hasCompletedFinancialBaseline(db));
   try {
     await db.batch([
       db
         .prepare(
           `INSERT INTO scheduled_sync_batches (
-             id, schedule_key, notification_claimed_at, created_at
-           ) VALUES (?, 'default', NULL, ?)`,
+             id, schedule_key, notification_claimed_at, created_at,
+             is_baseline, assets_before_twd, credit_card_debt_before_twd,
+             missing_currencies_before
+           ) VALUES (?, 'default', NULL, ?, ?, ?, ?, ?)`,
         )
-        .bind(batchId, now),
-      ...jobs.results.map((job) =>
+        .bind(
+          batchId,
+          now,
+          isBaseline ? 1 : 0,
+          snapshot.assetsTwd,
+          snapshot.creditCardDebtTwd,
+          JSON.stringify(snapshot.missingCurrencies),
+        ),
+      ...jobs.map((job) =>
         db
           .prepare(
             `INSERT INTO scheduled_sync_batch_results (
@@ -74,14 +116,20 @@ export async function ensureDefaultScheduleBatch(db: D1Database) {
 }
 
 export async function findOpenDefaultScheduleBatchId(db: D1Database) {
-  const batch = await db
-    .prepare(
-      `SELECT id
-       FROM scheduled_sync_batches
-       WHERE schedule_key = 'default' AND notification_claimed_at IS NULL
-       LIMIT 1`,
+  const batch = await createDrizzle(db)
+    .select({ id: scheduledSyncBatches.id })
+    .from(scheduledSyncBatches)
+    .where(
+      and(
+        eq(scheduledSyncBatches.scheduleKey, "default"),
+        isNull(scheduledSyncBatches.notificationClaimedAt),
+      ),
     )
-    .first<BatchRow>();
+    .limit(1)
+    .get()
+    .catch((error) => {
+      throw sanitizeDatabaseError(error);
+    });
   return batch?.id ?? null;
 }
 
@@ -89,24 +137,35 @@ export async function findNextDefaultScheduleBatchJob(
   db: D1Database,
   batchId: string,
 ) {
-  return (
-    (await db
-      .prepare(
-        `SELECT j.*
-         FROM scheduled_sync_batch_results r
-         JOIN sync_jobs j ON j.id = r.job_id
-         WHERE r.batch_id = ?
-           AND r.completed_at IS NULL
-           AND j.enabled = 1
-           AND j.schedule_mode = 'inherit'
-           AND (j.last_status IS NULL OR j.last_status != 'needs_user_action')
-           AND (j.locked_until IS NULL OR j.locked_until < ?)
-         ORDER BY j.next_run_at ASC, j.id ASC
-         LIMIT 1`,
-      )
-      .bind(batchId, new Date().toISOString())
-      .first<SyncJobRow<ConnectorId>>()) ?? null
-  );
+  const row = await createDrizzle(db)
+    .select(syncJobSelection)
+    .from(scheduledSyncBatchResults)
+    .innerJoin(syncJobs, eq(syncJobs.id, scheduledSyncBatchResults.jobId))
+    .innerJoin(connectorSettings, syncJobConfiguredJoin)
+    .where(
+      and(
+        eq(scheduledSyncBatchResults.batchId, batchId),
+        isNull(scheduledSyncBatchResults.completedAt),
+        eq(syncJobs.enabled, 1),
+        eq(syncJobs.scheduleMode, "inherit"),
+        or(
+          isNull(syncJobs.lastStatus),
+          ne(syncJobs.lastStatus, "needs_user_action"),
+        ),
+        sql`NOT EXISTS (SELECT 1 FROM ${einvoiceSyncRuns} WHERE ${einvoiceSyncRuns.syncJobId} = ${syncJobs.id} AND ${einvoiceSyncRuns.status} IN ('queued', 'initializing', 'processing'))`,
+        or(
+          isNull(syncJobs.lockedUntil),
+          lt(syncJobs.lockedUntil, new Date().toISOString()),
+        ),
+      ),
+    )
+    .orderBy(asc(syncJobs.nextRunAt), asc(syncJobs.id))
+    .limit(1)
+    .get()
+    .catch((error) => {
+      throw sanitizeDatabaseError(error);
+    });
+  return (row as SyncJobRow<ConnectorId> | undefined) ?? null;
 }
 
 export async function recordDefaultScheduleBatchResult(
@@ -115,26 +174,48 @@ export async function recordDefaultScheduleBatchResult(
     batchId: string;
     jobId: string;
     notification: SyncNotificationEvent;
+    newRecords: SyncNewRecordCounts;
+    runId?: string;
   },
 ) {
-  const result = await db
+  const statement = db
     .prepare(
       `UPDATE scheduled_sync_batch_results
-       SET connector_id = ?, status = ?, completed_at = ?
+       SET connector_id = ?, status = ?, completed_at = ?,
+           new_invoices = ?,
+           new_bank_transactions = ?,
+           new_investment_transactions = ?
        WHERE batch_id = ? AND job_id = ? AND completed_at IS NULL`,
     )
     .bind(
       input.notification.connectorId,
       input.notification.status,
       new Date().toISOString(),
+      input.newRecords.invoices,
+      input.newRecords.bankTransactions,
+      input.newRecords.investmentTransactions,
       input.batchId,
       input.jobId,
-    )
-    .run();
-  return result.meta.changes === 1;
+    );
+  const results = await db.batch([
+    statement,
+    ...(input.runId
+      ? [
+          publishActivityRunStatement(
+            db,
+            input.runId,
+            input.batchId,
+            input.notification.connectorId,
+          ),
+        ]
+      : []),
+  ]);
+  return results[0]!.meta.changes === 1;
 }
 
 export async function finalizeOpenDefaultScheduleBatch(db: D1Database) {
+  const unfinished = await findUnfinishedActivityReport(db);
+  if (unfinished) await safelyMaterializeActivityReport(db, unfinished);
   const batchId = await findOpenDefaultScheduleBatchId(db);
   if (!batchId) return null;
   return claimCompletedDefaultScheduleBatch(db, batchId);
@@ -147,12 +228,18 @@ export async function claimCompletedDefaultScheduleBatch(
   await reconcileDefaultScheduleBatchMembers(db, batchId);
 
   const now = new Date().toISOString();
+  const snapshot = await calculateCurrentFinancialSnapshot(db);
   const claim = await db
     .prepare(
       `UPDATE scheduled_sync_batches
-       SET notification_claimed_at = ?
+       SET notification_claimed_at = ?,
+           completed_at = ?,
+           assets_after_twd = ?,
+           credit_card_debt_after_twd = ?,
+           missing_currencies_after = ?
        WHERE id = ?
          AND notification_claimed_at IS NULL
+         AND completed_at IS NULL
          AND EXISTS (
            SELECT 1
            FROM scheduled_sync_batch_results
@@ -164,20 +251,55 @@ export async function claimCompletedDefaultScheduleBatch(
            WHERE batch_id = ? AND completed_at IS NULL
          )`,
     )
-    .bind(now, batchId, batchId, batchId)
-    .run();
-  if (claim.meta.changes !== 1) return null;
-
-  const results = await db
-    .prepare(
-      `SELECT connector_id, status
-       FROM scheduled_sync_batch_results
-       WHERE batch_id = ? AND status IS NOT NULL
-       ORDER BY job_id ASC`,
+    .bind(
+      now,
+      now,
+      snapshot.assetsTwd,
+      snapshot.creditCardDebtTwd,
+      JSON.stringify(snapshot.missingCurrencies),
+      batchId,
+      batchId,
+      batchId,
     )
-    .bind(batchId)
-    .all<BatchResultRow>();
-  return results.results.map((row) => ({
+    .run();
+  if (claim.meta.changes !== 1) {
+    const completed = await createDrizzle(db)
+      .select({ id: scheduledSyncBatches.id })
+      .from(scheduledSyncBatches)
+      .where(
+        and(
+          eq(scheduledSyncBatches.id, batchId),
+          isNotNull(scheduledSyncBatches.completedAt),
+        ),
+      )
+      .get();
+    if (completed) await safelyMaterializeActivityReport(db, batchId);
+    return null;
+  }
+  await safelyMaterializeActivityReport(db, batchId);
+
+  const results = await createDrizzle(db)
+    .select({
+      connector_id: sql<
+        BatchResultRow["connector_id"]
+      >`${scheduledSyncBatchResults.connectorId}`,
+      status: sql<
+        BatchResultRow["status"]
+      >`${scheduledSyncBatchResults.status}`,
+    })
+    .from(scheduledSyncBatchResults)
+    .where(
+      and(
+        eq(scheduledSyncBatchResults.batchId, batchId),
+        isNotNull(scheduledSyncBatchResults.status),
+      ),
+    )
+    .orderBy(asc(scheduledSyncBatchResults.jobId))
+    .all()
+    .catch((error) => {
+      throw sanitizeDatabaseError(error);
+    });
+  return results.map((row) => ({
     connectorId: row.connector_id,
     status: row.status,
   }));
@@ -187,29 +309,45 @@ async function reconcileDefaultScheduleBatchMembers(
   db: D1Database,
   batchId: string,
 ) {
-  const rows = await db
-    .prepare(
-      `SELECT
-         r.job_id,
-         j.enabled,
-         j.schedule_mode,
-         j.last_status,
-         j.locked_until,
-         j.lock_trigger
-       FROM scheduled_sync_batch_results r
-       LEFT JOIN sync_jobs j ON j.id = r.job_id
-       WHERE r.batch_id = ? AND r.completed_at IS NULL`,
+  const rows = await createDrizzle(db)
+    .select({
+      job_id: scheduledSyncBatchResults.jobId,
+      enabled: syncJobs.enabled,
+      schedule_mode: sql<
+        BatchMemberRow["schedule_mode"]
+      >`${syncJobs.scheduleMode}`,
+      last_status: sql<BatchMemberRow["last_status"]>`${syncJobs.lastStatus}`,
+      locked_until: syncJobs.lockedUntil,
+      lock_trigger: sql<
+        BatchMemberRow["lock_trigger"]
+      >`${syncJobs.lockTrigger}`,
+      configured_connector_id: connectorSettings.connectorId,
+    })
+    .from(scheduledSyncBatchResults)
+    .leftJoin(syncJobs, eq(syncJobs.id, scheduledSyncBatchResults.jobId))
+    .leftJoin(
+      connectorSettings,
+      eq(connectorSettings.connectorId, syncJobs.connectorId),
     )
-    .bind(batchId)
-    .all<BatchMemberRow>();
+    .where(
+      and(
+        eq(scheduledSyncBatchResults.batchId, batchId),
+        isNull(scheduledSyncBatchResults.completedAt),
+      ),
+    )
+    .all()
+    .catch((error) => {
+      throw sanitizeDatabaseError(error);
+    });
   const now = Date.now();
 
-  for (const row of rows.results) {
+  for (const row of rows) {
     const noLongerInherited =
       row.enabled === null ||
       row.enabled !== 1 ||
       row.schedule_mode === null ||
-      row.schedule_mode !== "inherit";
+      row.schedule_mode !== "inherit" ||
+      row.configured_connector_id === null;
     const needsUserAction = row.last_status === "needs_user_action";
     const scheduledRunIsActive =
       row.lock_trigger === "scheduled" &&

@@ -2,19 +2,13 @@
   import { onMount } from "svelte";
   import { Ellipsis, Eye, EyeOff } from "@lucide/svelte";
   import { QueryClientProvider } from "@tanstack/svelte-query";
-  import Activity from "@/features/activity/ActivityPage.svelte";
-  import Assets from "@/features/assets/AssetsPage.svelte";
-  import Bank from "@/features/assets/Bank.svelte";
-  import Cards from "@/features/assets/Cards.svelte";
-  import Investments from "@/features/assets/Investments.svelte";
-  import ManualAssets from "@/features/assets/ManualAssets.svelte";
-  import Invoices from "@/features/invoices/InvoicesPage.svelte";
   import Overview from "@/features/overview/OverviewPage.svelte";
-  import SettingsView from "@/features/settings/SettingsPage.svelte";
+  import type { ConnectorId } from "@/data/connectors/types";
   import { createApiClient } from "@/shared/api/client";
   import { swipeBack } from "@/shared/actions/swipe-back";
   import { moneyState } from "@/shared/state/money-visibility.svelte";
   import Button from "@/shared/ui/Button.svelte";
+  import EmptyState from "@/shared/ui/EmptyState.svelte";
   import Icon from "@/shared/ui/Icon.svelte";
   import {
     detailLabels,
@@ -33,8 +27,28 @@
   } from "./types";
   import "../styles.css";
 
+  type LazyView = Exclude<View, "overview">;
+  type PageKey =
+    "assets" | "activity" | "investments" | "manual-assets" | "settings";
+  type LazyPageModule =
+    | typeof import("@/features/assets/AssetsPage.svelte")
+    | typeof import("@/features/activity/ActivityPage.svelte")
+    | typeof import("@/features/assets/Investments.svelte")
+    | typeof import("@/features/assets/ManualAssets.svelte")
+    | typeof import("@/features/settings/SettingsPage.svelte");
+
+  const pageLoaders = {
+    assets: () => import("@/features/assets/AssetsPage.svelte"),
+    activity: () => import("@/features/activity/ActivityPage.svelte"),
+    investments: () => import("@/features/assets/Investments.svelte"),
+    "manual-assets": () => import("@/features/assets/ManualAssets.svelte"),
+    settings: () => import("@/features/settings/SettingsPage.svelte"),
+  } satisfies Record<PageKey, () => Promise<LazyPageModule>>;
+  const pagePromises: Partial<Record<PageKey, Promise<LazyPageModule>>> = {};
+
   const api = createApiClient();
   let view = $state<View>("overview");
+  let connectorTarget = $state<ConnectorId | null>(null);
   let runtime = $state<RuntimeInfo>({ demoMode: false });
   const isDetail = (v: View): v is DetailView => Object.hasOwn(detailLabels, v);
   const isMobileSetting = (v: View): v is MobileSettingsView =>
@@ -53,6 +67,30 @@
   const mobileSetting = $derived(
     isMobileSetting(view) ? mobileSettingsLabels[view] : undefined,
   );
+
+  function pageKey(next: LazyView): PageKey {
+    if (
+      next === "assets" ||
+      next === "activity" ||
+      next === "investments" ||
+      next === "manual-assets"
+    )
+      return next;
+    return "settings";
+  }
+
+  function getPagePromise(key: PageKey) {
+    return (pagePromises[key] ??= pageLoaders[key]());
+  }
+
+  const pagePromise = $derived.by(() => {
+    if (view === "overview") return Promise.resolve(undefined);
+    return getPagePromise(pageKey(view as LazyView));
+  });
+
+  function retryPage() {
+    window.location.reload();
+  }
 
   const isStandalone = () =>
     document.documentElement.classList.contains("is-standalone");
@@ -89,8 +127,10 @@
       localStorage.getItem("taiwan-fin-hub-money-hidden") === "true";
     return () => window.removeEventListener("hashchange", handleHashChange);
   });
-  function navigate(next: View) {
+  function navigate(next: View, targetConnector?: ConnectorId) {
     view = next;
+    connectorTarget =
+      next === "data-sources" ? (targetConnector ?? null) : null;
     const nextHash = viewHash(next);
     if (window.location.hash !== nextHash) {
       if (isStandalone()) {
@@ -130,11 +170,11 @@
       class="hidden border-r border-white/10 bg-ink px-6 py-7 text-white xl:sticky xl:top-0 xl:flex xl:h-screen xl:flex-col"
     >
       <div class="px-2">
-        <h1 class="text-xl font-semibold tracking-normal">Taiwan Fin Hub</h1>
+        <h1 class="text-xl font-semibold tracking-normal">不用記帳</h1>
         <p
           class="mt-2 text-xs font-semibold uppercase tracking-[0.16em] text-steel/90"
         >
-          Wealth OS
+          ALL SET
         </p>
       </div>
       <nav class="mt-6 grid gap-1">
@@ -153,19 +193,19 @@
 
     <div class="min-w-0 pb-20">
       <div
-        class="no-scrollbar hidden border-b border-ink/10 bg-white px-4 py-2 md:flex md:gap-1 md:overflow-x-auto xl:hidden"
+        class="no-scrollbar hidden border-b border-ink/10 bg-paper px-4 py-2 md:flex md:gap-1 md:overflow-x-auto xl:hidden"
       >
         {#each navItems as item (item.view)}
           {@const NavIcon = item.icon}
           <button
-            class={`flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium ${primaryView === item.view ? "bg-ink text-white" : "text-ink/60 hover:bg-ink/5"}`}
+            class={`flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-medium ${primaryView === item.view ? "bg-ink text-white" : "text-subtle hover:bg-ink/5"}`}
             onclick={() => navigate(item.view)}
             ><NavIcon class="size-4" />{item.label}</button
           >
         {/each}
       </div>
       <header
-        class="sticky top-0 z-20 border-b border-ink/10 bg-white/95 backdrop-blur-sm xl:static xl:bg-transparent xl:backdrop-blur-0"
+        class="sticky top-0 z-20 border-b border-ink/10 bg-paper/95 backdrop-blur-sm xl:static xl:bg-transparent xl:backdrop-blur-0"
       >
         <div
           class="mx-auto flex max-w-[1440px] flex-col gap-3 px-4 py-4 sm:px-6 xl:px-8 xl:py-6"
@@ -201,13 +241,15 @@
                         ? "資產總覽"
                         : primaryView === "activity"
                           ? "所有活動"
-                          : currentView.label}</span
+                          : (currentView.pageTitle ?? currentView.label)}</span
                   ><span class="hidden md:inline"
-                    >{detail?.label ?? currentView.label}</span
+                    >{detail?.label ??
+                      currentView.pageTitle ??
+                      currentView.label}</span
                   >
                 </h1>
               {/if}
-              <p class="mt-1 hidden text-sm text-ink/55 md:block">
+              <p class="mt-1 hidden text-sm leading-6 text-subtle md:block">
                 {detail?.description ??
                   mobileSetting?.description ??
                   currentView.description}
@@ -235,24 +277,57 @@
       <main
         class="mx-auto max-w-[1440px] px-4 pb-5 pt-0 sm:px-6 md:py-5 xl:px-8 xl:py-6"
       >
-        {#if view === "overview"}<Overview {api} {navigate} />
-        {:else if view === "assets"}<Assets {api} {navigate} />
-        {:else if view === "activity"}<Activity {api} {navigate} />
-        {:else if view === "invoices"}<Invoices {api} />
-        {:else if view === "investments"}<Investments {api} />
-        {:else if view === "cards"}<Cards {api} />
-        {:else if view === "bank"}<Bank {api} {navigate} />
-        {:else if view === "manual-assets"}<ManualAssets {api} />
-        {:else}<SettingsView
-            {api}
-            demoMode={runtime.demoMode}
-            mobileView={view === "more"
-              ? "more"
-              : isMobileSetting(view)
-                ? view
-                : undefined}
-            {navigate}
-          />{/if}
+        {#if view === "overview"}
+          <Overview {api} {navigate} />
+        {:else}
+          {#await pagePromise}
+            <EmptyState title="載入頁面中" body="正在準備內容。" />
+          {:then module}
+            {#if module}
+              {#if view === "assets"}
+                {@const Page =
+                  module.default as typeof import("@/features/assets/AssetsPage.svelte").default}
+                <Page {api} />
+              {:else if view === "activity"}
+                {@const Page =
+                  module.default as typeof import("@/features/activity/ActivityPage.svelte").default}
+                <Page {api} />
+              {:else if view === "investments"}
+                {@const Page =
+                  module.default as typeof import("@/features/assets/Investments.svelte").default}
+                <Page {api} />
+              {:else if view === "manual-assets"}
+                {@const Page =
+                  module.default as typeof import("@/features/assets/ManualAssets.svelte").default}
+                <Page {api} />
+              {:else}
+                {@const Page =
+                  module.default as typeof import("@/features/settings/SettingsPage.svelte").default}
+                <Page
+                  {api}
+                  demoMode={runtime.demoMode}
+                  {connectorTarget}
+                  mobileView={view === "more"
+                    ? "more"
+                    : isMobileSetting(view)
+                      ? view
+                      : undefined}
+                  {navigate}
+                />
+              {/if}
+            {/if}
+          {:catch}
+            <section class="min-w-0 py-16" role="alert" aria-live="assertive">
+              <h2 class="text-base font-semibold tracking-tight">
+                頁面載入失敗
+              </h2>
+              <p class="mt-2 text-caption text-subtle">請再試一次。</p>
+              <Button class="mt-5" variant="outline" onclick={retryPage}
+                >重新載入</Button
+              >
+            </section>
+          {/await}
+        {/if}
       </main>
       <footer
         class="mx-auto hidden max-w-[1440px] border-t border-ink/8 px-4 py-6 sm:px-6 md:block xl:px-8"

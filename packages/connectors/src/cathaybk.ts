@@ -6,7 +6,10 @@ export const cathaybkConfigSchema = z.object({
   password: z.string().min(1).optional(),
   sessionCookies: z.string().optional(),
   sessionExpiresAt: z.string().optional(),
-  lookbackMonths: z.coerce.number().int().min(1).max(24).optional()
+  browserSessionId: z.string().min(1).optional(),
+  browserSessionExpiresAt: z.string().optional(),
+  otp: z.string().min(1).optional(),
+  otpChannel: z.enum(["email", "sms"]).optional(),
 });
 
 export type CathaybkConfig = z.infer<typeof cathaybkConfigSchema>;

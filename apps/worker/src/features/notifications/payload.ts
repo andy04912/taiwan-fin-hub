@@ -23,6 +23,15 @@ const connectorLabels: Record<ConnectorId, string> = {
   cathaybk: "國泰世華銀行",
   sinopac: "永豐行動銀行",
   taishin: "台新銀行",
+  ctbc: "中國信託銀行",
+  skbank: "新光銀行",
+  obank: "王道銀行",
+  nextbank: "將來銀行",
+  hncb: "華南銀行",
+  kgibank: "凱基銀行",
+  firstbank: "第一銀行",
+  megabank: "兆豐銀行",
+  rakuten: "樂天國際銀行",
 };
 
 export function syncNotificationPayload(
@@ -32,7 +41,7 @@ export function syncNotificationPayload(
   if (event.status === "success") {
     return {
       title: "同步完成",
-      body: `${connector}已完成排程同步。`,
+      body: `${connector}已完成排程同步，開啟 App 查看結果。`,
       url: "/#/overview",
       tag: `sync-${event.connectorId}-success`,
     };
@@ -68,7 +77,7 @@ export function scheduledSyncSummaryPayload(
   if (status === "success") {
     return {
       title: "同步完成",
-      body: `已完成 ${success} 個資料來源的預設排程同步。`,
+      body: "每日同步已完成，開啟 App 查看結果。",
       url: "/#/overview",
       tag: "sync-default-schedule-success",
     };

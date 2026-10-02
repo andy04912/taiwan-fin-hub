@@ -1,15 +1,27 @@
-import puppeteer, { type Page } from "@cloudflare/puppeteer";
-import type { BankAccount, BankBalanceSnapshot, BankTransaction, CreditCardBill, SyncResult } from "@taiwan-fin-hub/core";
-import type { EsunConfig } from "@taiwan-fin-hub/connectors";
+import { launchBrowserWithRetry } from "./browser.js";
+import {
+  buildEsunCreditTimelinePages,
+  collectEsunBrowserSnapshot,
+  collectEsunSnapshot,
+  esunCardNumbers,
+  readEsunCardBalances,
+  type EsunBrowserSession,
+  type EsunDepositDetail,
+  type EsunPortalApi,
+  type EsunSnapshot,
+} from "./esun-portal.js";
+import { type Page } from "@cloudflare/puppeteer";
+import type {
+  BankAccount,
+  BankBalanceSnapshot,
+  BankTransaction,
+  CreditCardBill,
+  SyncResult,
+} from "@taiwan-fin-hub/core";
+import { BANK_SYNC_MONTHS, type EsunConfig } from "@taiwan-fin-hub/connectors";
 
 const HOME_URL = "https://ebank.esunbank.com.tw/indexMobile.jsp";
-const CREDIT_CARD_DETAIL_URL = "https://ebank.esunbank.com.tw/fcm01/fcm01003/home/detail/processDetail.json";
-const CREDIT_CARD_TIMELINE_URL = "https://ebank.esunbank.com.tw/fcm01/fcm01003/home/detail/1Y/getTimelineList.json";
-const CREDIT_CARD_OVERVIEW_URL = "https://ebank.esunbank.com.tw/fcm01/fcm01010/home/initData.json";
-const CREDIT_CARD_BILLS_URL = "https://ebank.esunbank.com.tw/fcm01/fcm01003/bill/bills.json";
-const ACCOUNT_OVERVIEW_URL = "https://ebank.esunbank.com.tw/fms01/fms01029/home/initData.json";
-const ACCOUNT_TX_INIT_URL = "https://ebank.esunbank.com.tw/fao01/fao01013/home/initData.json";
-const ACCOUNT_TX_URL = "https://ebank.esunbank.com.tw/fao01/fao01002/search/findTxDetails.json";
+const PORTAL_URL = "https://ebank.esunbank.com.tw/esb/";
 
 function maskAccountNumber(value: string) {
   const suffix = value.slice(-4);
@@ -29,20 +41,31 @@ export function createEsunConnector(browser?: Fetcher) {
     id: "esun" as const,
     name: "E.SUN Bank 玉山銀行",
 
-    async sync(config: EsunConfig, cursor?: string): Promise<SyncResult<never>> {
+    async sync(
+      config: EsunConfig,
+      cursor?: string,
+    ): Promise<SyncResult<never>> {
       if (!config.userId || !config.account || !config.password) {
-        throw new Error("E.SUN Bank requires userId (身分證字號), account (使用者名稱), and password.");
+        throw new Error(
+          "E.SUN Bank requires userId (身分證字號), account (使用者名稱), and password.",
+        );
       }
 
       const client = new EsunHttpClient();
 
-      if (config.sessionCookies && config.sessionExpiresAt && new Date(config.sessionExpiresAt) > new Date()) {
+      if (
+        config.sessionCookies &&
+        config.sessionExpiresAt &&
+        new Date(config.sessionExpiresAt) > new Date()
+      ) {
         client.importCookies(config.sessionCookies);
       }
 
       if (!(await client.hasAuthenticatedSession())) {
         if (!browser) {
-          throw new Error("E.SUN Bank requires the BROWSER binding for interactive login.");
+          throw new Error(
+            "E.SUN Bank requires the BROWSER binding for interactive login.",
+          );
         }
         await loginWithBrowser(browser, client, config);
       }
@@ -51,33 +74,45 @@ export function createEsunConnector(browser?: Fetcher) {
       const depositWatermarks: Record<string, string> = {};
 
       console.log("[esun debug] scraping credit cards");
-      const creditCards = await scrapeCreditCards(client, config.lookbackMonths ?? 3);
+      const creditCards = requiredSnapshot(client).hasCreditCard
+        ? await scrapeCreditCards(client)
+        : emptyScraped();
       console.log("[esun debug] scraping deposit accounts");
-      const deposits = await scrapeDepositAccounts(client, depositWatermarks, config.lookbackMonths ?? 3);
+      const deposits = await scrapeDepositAccounts(client, depositWatermarks);
       const freshCookies = client.exportCookies();
       const expiresAt = new Date(Date.now() + 25 * 60 * 1000).toISOString();
 
       return {
         records: [],
         bankAccounts: [...creditCards.bankAccounts, ...deposits.bankAccounts],
-        bankBalanceSnapshots: [...creditCards.bankBalanceSnapshots, ...deposits.bankBalanceSnapshots],
-        bankTransactions: [...creditCards.bankTransactions, ...deposits.bankTransactions],
+        bankBalanceSnapshots: [
+          ...creditCards.bankBalanceSnapshots,
+          ...deposits.bankBalanceSnapshots,
+        ],
+        bankTransactions: [
+          ...creditCards.bankTransactions,
+          ...deposits.bankTransactions,
+        ],
         creditCardBills: creditCards.creditCardBills,
         cursor: JSON.stringify({
           ...cursorState,
           sessionCookies: freshCookies,
           sessionExpiresAt: expiresAt,
           depositWatermarks: undefined,
-          syncedAt: new Date().toISOString()
-        })
+          syncedAt: new Date().toISOString(),
+        }),
       };
-    }
+    },
   };
 }
 
-async function loginWithBrowser(browserBinding: Fetcher, client: EsunHttpClient, config: EsunConfig) {
+async function loginWithBrowser(
+  browserBinding: Fetcher,
+  client: EsunHttpClient,
+  config: EsunConfig,
+) {
   console.log("[esun debug] launching browser");
-  const browser = await puppeteer.launch(browserBinding);
+  const browser = await launchBrowserWithRetry(browserBinding);
   const page = await browser.newPage();
   let txnDupToken: string | undefined;
 
@@ -87,24 +122,28 @@ async function loginWithBrowser(browserBinding: Fetcher, client: EsunHttpClient,
       if (token) txnDupToken = token;
     });
     await page.setViewport({ width: 390, height: 844, isMobile: true });
-    await page.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/147.0.0.0 Mobile/15E148 Safari/604.1");
-    console.log(`[esun debug] navigating to ${HOME_URL}`);
-    await page.goto(HOME_URL, { waitUntil: "networkidle0", timeout: 30000 });
+    await page.setUserAgent(
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/147.0.0.0 Mobile/15E148 Safari/604.1",
+    );
+    console.log(`[esun debug] navigating to ${PORTAL_URL}`);
+    await page.goto(PORTAL_URL, { waitUntil: "networkidle0", timeout: 30000 });
     console.log("[esun debug] login page opened");
     await loginMobilePage(page, config);
-    console.log("[esun debug] login succeeded, setting up credit card session");
-    await setupCreditCardBrowserSession(page);
-
-    client.importCookies(JSON.stringify(await page.cookies()));
+    console.log("[esun debug] login succeeded, collecting account data");
+    const collected = await collectEsunBrowserSnapshot(browser, page);
+    client.snapshot = collected.snapshot;
+    client.rememberBrowserSession(collected.session);
     if (txnDupToken) {
       client.setTxnDupToken(txnDupToken);
     }
     console.log("[esun debug] browser login complete");
   } catch (error) {
-    console.error(JSON.stringify({
-      event: "esun_browser_login_failed",
-      errorType: error instanceof Error ? error.name : "UNKNOWN_ERROR"
-    }));
+    console.error(
+      JSON.stringify({
+        event: "esun_browser_login_failed",
+        errorType: error instanceof Error ? error.name : "UNKNOWN_ERROR",
+      }),
+    );
     throw error;
   } finally {
     await browser.close();
@@ -112,70 +151,60 @@ async function loginWithBrowser(browserBinding: Fetcher, client: EsunHttpClient,
 }
 
 async function loginMobilePage(page: Page, config: EsunConfig) {
-  console.log("[esun debug] waiting for #custid field");
-  await page.waitForSelector("#custid", { timeout: 30000 });
-  await page.click("#custid", { clickCount: 3 });
-  await page.type("#custid", config.userId!.toUpperCase());
-  await page.click("#name", { clickCount: 3 });
-  await page.type("#name", config.account!);
-  await page.click("#pxsswd", { clickCount: 3 });
-  await page.type("#pxsswd", config.password!);
+  await page.waitForSelector('input[name="id"]', { timeout: 30000 });
+  await page.type('input[name="id"]', config.userId!.toUpperCase());
+  await page.type('input[name="userName"]', config.account!);
+  await page.type('input[name="pxssword"]', config.password!);
 
-  console.log("[esun debug] submitting login form");
-  await page.click(".btn-submit");
-  await waitForMobileLogin(page);
-}
-
-async function waitForMobileLogin(page: Page, depth = 0) {
-  if (depth > 3) {
-    throw new Error("E.SUN browser login: duplicate-login dialog kept reappearing.");
+  const loginResponse = page.waitForResponse(
+    (response) => response.url().includes("/cpo08/cpo08001/home/doAction"),
+    { timeout: 30000 },
+  );
+  await page.click("button.btn-main-fill");
+  await page
+    .waitForFunction(
+      () => document.querySelectorAll(".input-error-message").length > 0,
+      { timeout: 1000 },
+    )
+    .catch(() => undefined);
+  const validationErrors = await page.evaluate(() =>
+    Array.from(document.querySelectorAll(".input-error-message"))
+      .map((element) => element.textContent?.trim())
+      .filter(Boolean),
+  );
+  if (validationErrors.length > 0) {
+    throw new Error(`E.SUN portal login form: ${validationErrors.join(" ")}`);
   }
-
-  console.log("[esun debug] waiting for login result (LOGINKEY cookie, error text, or duplicate-login dialog)");
-  const result = await Promise.race([
-    page.waitForFunction(() => document.cookie.includes("LOGINKEY"), { timeout: 30000 }).then(() => "ok"),
-    page.waitForFunction(() => /登入失敗|錯誤|無法|暫時/.test(document.body.innerText), { timeout: 30000 }).then(() => "error"),
-    page.waitForFunction(() => document.body.innerText.includes("重複登入"), { timeout: 30000 }).then(() => "duplicate")
-  ]);
-  console.log(`[esun debug] login result=${result}`);
-
-  if (result === "duplicate") {
-    console.log("[esun debug] duplicate-login dialog detected, clicking 確定登入");
-    await clickByText(page, "確定登入");
-    return waitForMobileLogin(page, depth + 1);
+  const response = await loginResponse;
+  let result = (await response.json()) as { resultCode?: string };
+  if (result.resultCode === "9005") {
+    await page.waitForFunction(
+      () =>
+        Array.from(document.querySelectorAll("button")).some(
+          (button) => button.textContent?.trim() === "確定登入",
+        ),
+      { timeout: 5000 },
+    );
+    const retryResponse = page.waitForResponse(
+      (response) => response.url().includes("/cpo08/cpo08001/home/doAction"),
+      { timeout: 30000 },
+    );
+    await page.evaluate(() => {
+      const button = Array.from(document.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "確定登入",
+      );
+      button?.click();
+    });
+    result = (await (await retryResponse).json()) as { resultCode?: string };
   }
-
-  if (result === "error" && !(await page.evaluate(() => document.cookie.includes("LOGINKEY")))) {
-    throw new Error("E.SUN browser login failed.");
+  console.log(
+    `[esun debug] portal login result=${result.resultCode ?? "missing"}`,
+  );
+  if (result.resultCode !== "0000") {
+    throw new Error(
+      `E.SUN portal login failed (${result.resultCode ?? "unknown"}).`,
+    );
   }
-}
-
-async function clickByText(page: Page, label: string) {
-  const clicked = await page.evaluate((text) => {
-    const elements = Array.from(document.querySelectorAll<HTMLElement>("button, a, div, span"));
-    const target = elements.find((el) => el.textContent?.trim() === text);
-    target?.click();
-    return Boolean(target);
-  }, label);
-
-  if (!clicked) {
-    throw new Error(`E.SUN browser login: could not find "${label}" button.`);
-  }
-}
-
-async function setupCreditCardBrowserSession(page: Page) {
-  console.log("[esun debug] waiting for window.$Utils");
-  await page.waitForFunction(() => Boolean((window as Window & { $Utils?: unknown }).$Utils), { timeout: 30000 });
-  const detailResponse = page.waitForResponse(
-    (response) => response.url().includes("/fcm01/fcm01003/home/detail/processDetail.json"),
-    { timeout: 30000 }
-  ).catch(() => undefined);
-  console.log("[esun debug] navigating to credit card detail via $Utils.navigate.goTxnById");
-  await page.evaluate(() => {
-    const utils = (window as Window & { $Utils?: { navigate?: { goTxnById?: (id: string, params?: unknown) => void } } }).$Utils;
-    utils?.navigate?.goTxnById?.("FCM01003", { Tab: "01", List: "03" });
-  });
-  await detailResponse;
 }
 
 type Scraped = {
@@ -184,6 +213,15 @@ type Scraped = {
   bankTransactions: Array<Omit<BankTransaction, "id" | "connectorId">>;
   creditCardBills: Array<Omit<CreditCardBill, "id" | "connectorId">>;
 };
+
+function emptyScraped(): Scraped {
+  return {
+    bankAccounts: [],
+    bankBalanceSnapshots: [],
+    bankTransactions: [],
+    creditCardBills: [],
+  };
+}
 
 interface EsunApiResponse<T> {
   rsStatus?: {
@@ -222,47 +260,6 @@ interface EsunMobileLoginData {
   custCode?: string | null;
 }
 
-interface EsunCardRow {
-  cardNo?: string | null;
-  cardNoDesc?: string | null;
-  cardType?: string | null;
-  dm1Cano?: string | null;
-  typeB?: boolean | null;
-}
-
-interface EsunCardDetailData {
-  balance?: string | null;
-  creditLimit?: string | null;
-  availCreditAmt?: string | null;
-  availableAmt?: string | null;
-  creditCardList?: EsunCardRow[] | null;
-  billList?: Array<{
-    billYm?: string | null;
-    billCur?: string | null;
-    payAmt?: string | null;
-    paidAmt?: string | null;
-    payDueDate?: string | null;
-    dueDate?: string | null;
-  }> | null;
-}
-
-interface EsunCardOverviewData {
-  trsam?: number | null;   // total credit limit (永久信用額度)
-  useam?: number | null;   // usable/available credit remaining (可用額度)
-  tamt?: number | null;    // current statement total amount (本期帳單)
-  mimpy?: number | null;   // minimum payment
-  paydt?: string | null;   // payment due date (繳款截止日), format "0YYYMMDD" (民國)
-  intdt?: string | null;   // statement closing date (帳單截止日), format "0YYYMMDD"
-  lstym?: number | null;   // latest billing period yymm
-  bills?: Array<{
-    bym6?: number | null;  // billing period (e.g. 11505 = 民國115年05月)
-    tamt?: number | null;  // statement total
-    mimpy?: number | null; // minimum payment
-    payam?: number | null; // amount already paid
-    cucid?: string | null; // currency
-  }> | null;
-}
-
 export interface EsunTimelineTransaction {
   payCur?: string | null;
   payAmt?: string | null;
@@ -275,6 +272,8 @@ export interface EsunTimelineTransaction {
   cardNoDesc?: string | null;
   cardType?: string | null;
   acfg?: string | null;
+  consumerTime?: string | null;
+  esunFeed?: "realtime" | "history";
 }
 
 export interface EsunTimelineMonth {
@@ -283,143 +282,10 @@ export interface EsunTimelineMonth {
   txnList?: EsunTimelineTransaction[] | null;
 }
 
-interface EsunTimelineData {
-  timelineList?: EsunTimelineMonth[] | null;
-  startDate?: string | null;
-  endDate?: string | null;
-  isNoData?: boolean | null;
-}
-
 export interface EsunTimelinePage {
   timelineList: EsunTimelineMonth[];
   startDate?: string;
   endDate?: string;
-}
-
-async function scrapeCreditCards(client: EsunHttpClient, lookbackMonths: number): Promise<Scraped> {
-  const [detail, overview] = await Promise.all([
-    fetchCreditCardDetail(client),
-    client.postJson<EsunCardOverviewData>(CREDIT_CARD_OVERVIEW_URL, {})
-  ]);
-  const asOfAt = new Date().toISOString();
-
-  const cards = getCreditCards(detail);
-  const bankTransactions = await scrapeTransactions(client);
-  const accountIds = new Set<string>([
-    ...cards.map((card) => creditCardSourceId(card.cardNo)),
-    ...bankTransactions.map((transaction) => transaction.accountId)
-  ]);
-  accountIds.delete("");
-
-  const mainSourceId = "credit:esun:main";
-  accountIds.add(mainSourceId);
-
-  // overview fields:
-  //   trsam = total credit limit (永久信用額度)
-  //   useam = usable/available amount remaining (可用額度) — NOT "used" despite the name
-  //   tamt  = current statement total (本期帳單)
-  //   intdt = statement closing date (帳單截止日), format "0YYYMMDD"
-  //   paydt = payment due date (繳款截止日), format "0YYYMMDD"
-  const creditLimit = overview.trsam ?? undefined;
-  const availableCredit = overview.useam ?? undefined;
-  const outstanding = overview.trsam != null && overview.useam != null
-    ? overview.trsam - overview.useam   // total charges outstanding across all cards
-    : 0;
-  const paymentDueDate = parseEsunCompactDate(overview.paydt) ?? undefined;
-  const statementClosingDate = parseEsunCompactDate(overview.intdt) ?? undefined;
-  const currentBill = overview.bills?.[0];
-  const statementBalance = currentBill?.tamt ?? overview.tamt ?? undefined;
-  const noPaymentNeeded = outstanding === 0;
-
-  console.log(JSON.stringify({
-    event: "esun_credit_card_overview_parsed",
-    creditLimitAvailable: creditLimit !== undefined,
-    availableCreditAvailable: availableCredit !== undefined,
-    statementBalanceAvailable: statementBalance !== undefined,
-    paymentDueDateAvailable: paymentDueDate !== undefined,
-    statementClosingDateAvailable: statementClosingDate !== undefined,
-    noPaymentNeeded
-  }));
-
-  const cardBySourceId = new Map(cards.map((card) => [creditCardSourceId(card.cardNo), card]));
-  const bankAccounts: Scraped["bankAccounts"] = Array.from(accountIds).map((sourceId) => {
-    const card = cardBySourceId.get(sourceId);
-    return {
-      sourceId,
-      institutionName: "玉山銀行",
-      accountName: card?.cardNoDesc || (sourceId === mainSourceId ? "玉山信用卡" : `玉山信用卡 ${sourceId.slice(-4)}`),
-      accountType: "credit",
-      currency: "TWD",
-      creditLimit,
-      raw: card ?? detail
-    };
-  });
-
-  const bankBalanceSnapshots: Scraped["bankBalanceSnapshots"] = [{
-    accountId: mainSourceId,
-    sourceId: `${mainSourceId}:${asOfAt}`,
-    balance: -outstanding,
-    availableBalance: availableCredit,
-    statementBalance,
-    paymentDueDate,
-    statementClosingDate,
-    noPaymentNeeded,
-    currency: "TWD",
-    asOfAt,
-    raw: { detail, overview }
-  }];
-
-  // Build credit card bills from overview.bills (all periods available)
-  const creditCardBills: Scraped["creditCardBills"] = (overview.bills ?? []).map((bill) => {
-    const bym6 = bill.bym6 ?? 0;
-    const year = Math.floor(bym6 / 100) + 1911;
-    const month = bym6 % 100;
-    const billingPeriod = `${year}-${String(month).padStart(2, "0")}`;
-    const tamt = bill.tamt ?? 0;
-    const payam = bill.payam ?? 0;
-    const isCurrentPeriod = bym6 === (overview.lstym ?? 0);
-    return {
-      accountId: mainSourceId,
-      sourceId: `${mainSourceId}:bill:${billingPeriod}`,
-      billingPeriod,
-      statementAmount: tamt || undefined,
-      minimumPayment: bill.mimpy ?? undefined,
-      paidAmount: payam || undefined,
-      isPaid: tamt > 0 && payam >= tamt,
-      paymentDueDate: isCurrentPeriod ? paymentDueDate : undefined,
-      statementClosingDate: isCurrentPeriod ? statementClosingDate : undefined,
-      currency: bill.cucid?.trim() || "TWD",
-      raw: bill
-    };
-  });
-
-  return { bankAccounts, bankBalanceSnapshots, bankTransactions, creditCardBills };
-}
-
-interface EsunCardOverviewBillsData {
-  payDT?: string | null;
-  intDT?: string | null;
-  billList?: Array<{ currency?: string | null; amount?: string | null }> | null;
-}
-
-async function fetchCreditCardDetail(client: EsunHttpClient): Promise<EsunCardDetailData> {
-  return client.postJson<EsunCardDetailData>(CREDIT_CARD_DETAIL_URL, {
-    detailCategoryId: "03"
-  });
-}
-
-function getCreditCards(detail: EsunCardDetailData): EsunCardRow[] {
-  return (detail.creditCardList ?? []).filter((card) => {
-    const cardNo = card.cardNo?.trim();
-    return Boolean(cardNo);
-  });
-}
-
-async function scrapeTransactions(
-  client: EsunHttpClient,
-): Promise<Array<Omit<BankTransaction, "id" | "connectorId">>> {
-  const pages = await fetchTimelinePages(client);
-  return normalizeEsunTimelineTransactions(pages);
 }
 
 type EsunTimelineCandidate = {
@@ -438,6 +304,44 @@ type EsunTimelineCandidate = {
   order: number;
 };
 
+function withPendingConsumerTime(
+  posted: EsunTimelineCandidate,
+  pending: EsunTimelineCandidate | undefined,
+): EsunTimelineCandidate {
+  const consumerTime =
+    posted.transaction.consumerTime ?? pending?.transaction.consumerTime;
+  if (!consumerTime || posted.transaction.consumerTime) return posted;
+  return {
+    ...posted,
+    transaction: { ...posted.transaction, consumerTime },
+  };
+}
+
+function esunTimelineAuthorizedAt(candidate: EsunTimelineCandidate) {
+  const clock = candidate.transaction.consumerTime?.trim();
+  if (!clock) return candidate.authorizedAt;
+  return (
+    normalizeEsunAuthorizedAt(candidate.authorizedAt, clock) ??
+    candidate.authorizedAt
+  );
+}
+
+function mergeEsunLifecycleGroup(group: EsunTimelineCandidate[]) {
+  const posted = group.filter(({ lifecycle }) => lifecycle === "已入帳");
+  const pending = group.filter(({ lifecycle }) => lifecycle === "未入帳");
+  const other = group.filter(
+    ({ lifecycle }) => lifecycle !== "已入帳" && lifecycle !== "未入帳",
+  );
+  if (posted.length === 0 || pending.length === 0) return group;
+  return [
+    ...posted.map((item, index) =>
+      withPendingConsumerTime(item, pending[index]),
+    ),
+    ...pending.slice(posted.length),
+    ...other,
+  ];
+}
+
 export function normalizeEsunTimelineTransactions(
   pages: EsunTimelinePage[],
 ): Array<Omit<BankTransaction, "id" | "connectorId">> {
@@ -450,20 +354,28 @@ export function normalizeEsunTimelineTransactions(
 
       for (const txn of month.txnList ?? []) {
         const lifecycle = txn.acfg?.trim() ?? "";
-        const authorizedAt = normalizeEsunMonthDay(
+        // Keep the legacy normalized value in the identity key.  The public
+        // authorizedAt value may now be date-only, but changing this key
+        // would turn every existing card transaction into a new row.
+        const identityAuthorizedAt = normalizeEsunMonthDay(
           year,
           txn.consumerDt ?? txn.postingDt ?? "",
         );
-        const postedDate = lifecycle === "未入帳"
-          ? undefined
-          : normalizeEsunMonthDay(year, txn.postingDt ?? txn.consumerDt ?? "");
+        const authorizedAt = identityAuthorizedAt.slice(0, 10);
+        const postedDate =
+          lifecycle === "未入帳"
+            ? undefined
+            : normalizeEsunMonthDay(
+                year,
+                txn.postingDt ?? txn.consumerDt ?? "",
+              );
         const rawAmount = parseTwd(txn.payAmt ?? txn.consumerAmt ?? "0");
         const currency = txn.payCur?.trim() || txn.consumerCur?.trim() || "TWD";
         const description = txn.storeName?.trim() || "玉山信用卡交易";
         const amount = signedCreditCardAmount(rawAmount, description);
         const accountId = creditCardSourceId(txn.cardNo);
         const sourceKey = [
-          authorizedAt,
+          identityAuthorizedAt,
           accountId,
           description,
           rawAmount,
@@ -497,13 +409,18 @@ export function normalizeEsunTimelineTransactions(
 
   const selected = Array.from(candidatesBySourceKey.values()).flatMap(
     (group) => {
-      const posted = group.filter(({ lifecycle }) => lifecycle === "已入帳");
-      const pending = group.filter(({ lifecycle }) => lifecycle === "未入帳");
-      const other = group.filter(
-        ({ lifecycle }) => lifecycle !== "已入帳" && lifecycle !== "未入帳",
+      const realtime = group.filter(
+        ({ transaction }) => transaction.esunFeed === "realtime",
       );
-      if (posted.length === 0 || pending.length === 0) return group;
-      return [...posted, ...pending.slice(posted.length), ...other];
+      const history = mergeEsunLifecycleGroup(
+        group.filter(({ transaction }) => transaction.esunFeed !== "realtime"),
+      );
+      return [
+        ...history.map((item, index) =>
+          withPendingConsumerTime(item, realtime[index]),
+        ),
+        ...realtime.slice(history.length),
+      ];
     },
   );
   selected.sort((left, right) => left.order - right.order);
@@ -516,7 +433,7 @@ export function normalizeEsunTimelineTransactions(
       accountId: candidate.accountId,
       sourceId: `${candidate.sourceKey}:${occurrence}`,
       postedDate: candidate.postedDate,
-      authorizedAt: candidate.authorizedAt,
+      authorizedAt: esunTimelineAuthorizedAt(candidate),
       amount: candidate.amount,
       currency: candidate.currency,
       description: candidate.description,
@@ -534,62 +451,164 @@ export function normalizeEsunTimelineTransactions(
   });
 }
 
-async function fetchTimelinePages(client: EsunHttpClient): Promise<EsunTimelinePage[]> {
-  const pages: EsunTimelinePage[] = [];
-  const seenRanges = new Set<string>();
-  let lastRange: { startDate?: string; endDate?: string } = {};
+async function scrapeCreditCards(client: EsunHttpClient): Promise<Scraped> {
+  const snapshot = requiredSnapshot(client);
+  const asOfAt = new Date().toISOString();
+  const cutoffDate = new Date();
+  cutoffDate.setMonth(cutoffDate.getMonth() - BANK_SYNC_MONTHS);
+  const scrapedTransactions = normalizeEsunTimelineTransactions(
+    buildEsunCreditTimelinePages(snapshot),
+  ).filter((transaction) => {
+    const timestamp = transaction.authorizedAt ?? transaction.postedDate;
+    if (!timestamp) return true;
+    const date = new Date(timestamp);
+    return Number.isNaN(date.getTime()) || date >= cutoffDate;
+  });
+  const mainSourceId = "credit:esun:main";
+  const physicalCardSourceIds = new Set([
+    ...esunCardNumbers(snapshot).map((cardNo) => creditCardSourceId(cardNo)),
+    ...scrapedTransactions
+      .map((transaction) => transaction.accountId)
+      .filter((accountId) => accountId !== mainSourceId),
+  ]);
+  const balanceAccountId = esunCreditBalanceAccountId(physicalCardSourceIds);
+  const bankTransactions = scrapedTransactions.map((transaction) =>
+    transaction.accountId === mainSourceId && balanceAccountId !== mainSourceId
+      ? { ...transaction, accountId: balanceAccountId }
+      : transaction,
+  );
+  const accountIds = new Set<string>([
+    ...physicalCardSourceIds,
+    ...bankTransactions.map((transaction) => transaction.accountId),
+  ]);
+  accountIds.delete("");
+  accountIds.add(balanceAccountId);
 
-  for (let index = 0; index < 4; index += 1) {
-    const rqData =
-      index === 0
-        ? { lastFlag: "N", cardNo: "" }
-        : {
-            lastStartDate: lastRange.startDate,
-            lastEndDate: lastRange.endDate,
-            lastFlag: "N",
-            cardNo: ""
-          };
-    const data = await client.postJson<EsunTimelineData>(CREDIT_CARD_TIMELINE_URL, rqData);
-    const timelineList = data.timelineList ?? [];
-    const rangeKey = `${data.startDate ?? ""}:${data.endDate ?? ""}`;
+  const balances = readEsunCardBalances(snapshot);
+  const bankAccounts: Scraped["bankAccounts"] = Array.from(accountIds).map(
+    (sourceId) => ({
+      sourceId,
+      institutionName: "玉山銀行",
+      accountName:
+        sourceId === mainSourceId
+          ? "玉山信用卡"
+          : `玉山信用卡 ${sourceId.slice(-4)}`,
+      accountType: "credit",
+      currency: balances.currency || "TWD",
+    }),
+  );
+  const bankBalanceSnapshots: Scraped["bankBalanceSnapshots"] = [
+    {
+      accountId: balanceAccountId,
+      sourceId: `${balanceAccountId}:${asOfAt}`,
+      balance: -balances.outstanding,
+      statementBalance: balances.statementBalance,
+      paymentDueDate: balances.paymentDueDate,
+      statementClosingDate: balances.statementClosingDate,
+      noPaymentNeeded: balances.outstanding === 0,
+      currency: balances.currency || "TWD",
+      asOfAt,
+    },
+  ];
+  const creditCardBills: Scraped["creditCardBills"] = balances.billingPeriod
+    ? [
+        {
+          accountId: balanceAccountId,
+          sourceId: `${balanceAccountId}:bill:${balances.billingPeriod}`,
+          billingPeriod: balances.billingPeriod,
+          statementAmount: balances.statementBalance,
+          minimumPayment: balances.minimumPayment,
+          isPaid: balances.isPaid,
+          paymentDueDate: balances.paymentDueDate,
+          statementClosingDate: balances.statementClosingDate,
+          currency: balances.currency || "TWD",
+        },
+      ]
+    : [];
 
-    if (data.isNoData || timelineList.length === 0 || seenRanges.has(rangeKey)) {
-      break;
-    }
+  return {
+    bankAccounts,
+    bankBalanceSnapshots,
+    bankTransactions,
+    creditCardBills,
+  };
+}
 
-    pages.push({
-      timelineList,
-      startDate: data.startDate ?? undefined,
-      endDate: data.endDate ?? undefined
-    });
-    seenRanges.add(rangeKey);
-
-    if (!data.startDate || !data.endDate) {
-      break;
-    }
-    lastRange = {
-      startDate: data.startDate.replace(/\//g, "-"),
-      endDate: data.endDate.replace(/\//g, "-")
-    };
+function requiredSnapshot(client: EsunHttpClient) {
+  if (!client.snapshot) {
+    throw new Error("E.SUN sync did not collect account data.");
   }
-
-  return pages;
+  return client.snapshot;
 }
 
-interface EsunOverviewAccountRow {
-  account?: string | null;
-  accountType?: string | null;
-  accountTypeName?: string | null;
-  name?: string | null;
-  aliasName?: string | null;
-  amount?: number | null;
-  currency?: string | null;
-  currencyList?: Array<{ cur?: string | null; amount?: number | null }> | null;
-}
+async function scrapeDepositAccounts(
+  client: EsunHttpClient,
+  watermarks: Record<string, string>,
+): Promise<Scraped & { watermarks: Record<string, string> }> {
+  const snapshot = requiredSnapshot(client);
+  const cutoffDate = new Date();
+  cutoffDate.setMonth(cutoffDate.getMonth() - BANK_SYNC_MONTHS);
+  const cutoffDateStr = cutoffDate
+    .toISOString()
+    .slice(0, 10)
+    .replace(/-/g, "/");
+  const asOfAt = new Date().toISOString();
+  const bankAccounts: Scraped["bankAccounts"] = [];
+  const bankBalanceSnapshots: Scraped["bankBalanceSnapshots"] = [];
+  const bankTransactions: Scraped["bankTransactions"] = [];
+  const newWatermarks: Record<string, string> = {};
 
-interface EsunAccountOverviewData {
-  twDetails?: EsunOverviewAccountRow[] | null;
-  frDetails?: EsunOverviewAccountRow[] | null;
+  const addAccount = (
+    account: EsunSnapshot["twDeposits"][number],
+    foreign: boolean,
+  ) => {
+    const accountId = foreign
+      ? depositSourceId(account.accountNo, account.currency)
+      : depositSourceId(account.accountNo);
+    bankAccounts.push({
+      sourceId: accountId,
+      institutionName: "玉山銀行",
+      accountName:
+        account.alias ||
+        (foreign ? `玉山外幣帳戶 (${account.currency})` : "玉山臺幣帳戶"),
+      accountType: "savings",
+      currency: account.currency,
+    });
+    bankBalanceSnapshots.push({
+      accountId,
+      sourceId: `${accountId}:${asOfAt}`,
+      balance: account.balance,
+      currency: account.currency,
+      asOfAt,
+    });
+    const rows = toEsunTxDetailRows(account.transactions).filter((detail) => {
+      const dateStr = detail.txDate?.trim().replace(/-/g, "/") ?? "";
+      if (dateStr && dateStr < cutoffDateStr) return false;
+      const watermark = watermarks[account.accountNo];
+      return !watermark || txDateTimeKey(detail) > watermark;
+    });
+    console.log(
+      `[esun debug] deposit ${maskAccountNumber(account.accountNo)} ${account.currency}: ${rows.length} rows`,
+    );
+    appendEsunDepositTransactions(
+      bankTransactions,
+      rows,
+      accountId,
+      account.currency,
+    );
+    newWatermarks[account.accountNo] = watermarks[account.accountNo];
+  };
+
+  for (const account of snapshot.twDeposits) addAccount(account, false);
+  for (const account of snapshot.frDeposits) addAccount(account, true);
+
+  return {
+    bankAccounts,
+    bankBalanceSnapshots,
+    bankTransactions,
+    creditCardBills: [],
+    watermarks: newWatermarks,
+  };
 }
 
 interface EsunTxDetailRow {
@@ -605,173 +624,38 @@ interface EsunTxDetailRow {
   displayCurrency?: string | null;
 }
 
-interface EsunTxMonth {
-  year?: string | null;
-  month?: string | null;
-  details?: EsunTxDetailRow[] | null;
+function toEsunTxDetailRows(details: EsunDepositDetail[]): EsunTxDetailRow[] {
+  return details.map((detail) => {
+    const credit = detail.debitCredit?.toUpperCase() === "CR";
+    const amount = String(detail.amount ?? "0").replace(/^-/, "");
+    return {
+      txDate: detail.txDate,
+      txTime: detail.txTime,
+      chc: detail.detailTitle,
+      amt: amount,
+      balance: detail.balance == null ? undefined : String(detail.balance),
+      memo1: detail.passbookRemark,
+      showCrFlag: credit ? "show" : "hide",
+      showDbFlag: credit ? "hide" : "show",
+      displayCurrency: detail.currency,
+    };
+  });
 }
 
-interface EsunTxDetailsData {
-  txMasters?: EsunTxMonth[] | null;
-  searchKxy?: string | null;
-}
-
-async function scrapeDepositAccounts(
-  client: EsunHttpClient,
-  watermarks: Record<string, string>,
-  lookbackMonths: number
-): Promise<Scraped & { watermarks: Record<string, string> }> {
-  const cutoffDate = new Date();
-  cutoffDate.setMonth(cutoffDate.getMonth() - lookbackMonths);
-  const cutoffDateStr = cutoffDate.toISOString().slice(0, 10).replace(/-/g, "/");
-  // Required: initialize server-side session state before findTxDetails calls
-  const txInit = await client.postJson<{ drActList?: unknown[] }>(ACCOUNT_TX_INIT_URL, {});
-  console.log(`[esun debug] fao01013 init: drActList=${txInit.drActList?.length ?? 0}`);
-  const overview = await client.postJson<EsunAccountOverviewData>(ACCOUNT_OVERVIEW_URL, {});
-  console.log(`[esun debug] overview: twDetails=${overview.twDetails?.length ?? 0} frDetails=${overview.frDetails?.length ?? 0} lookbackMonths=${lookbackMonths} cutoffDateStr=${cutoffDateStr}`);
-  const asOfAt = new Date().toISOString();
-
-  const bankAccounts: Scraped["bankAccounts"] = [];
-  const bankBalanceSnapshots: Scraped["bankBalanceSnapshots"] = [];
-  const bankTransactions: Scraped["bankTransactions"] = [];
-  const newWatermarks: Record<string, string> = {};
-
-  for (const row of (overview.twDetails ?? []).filter((account) => account.account)) {
-    const account = row.account!.trim();
-    const accountId = depositSourceId(account);
-    const currency = row.currency?.trim() || "TWD";
-
-    bankAccounts.push({
-      sourceId: accountId,
-      institutionName: "玉山銀行",
-      accountName: row.aliasName?.trim() || row.name?.trim() || row.accountTypeName?.trim() || "玉山臺幣帳戶",
-      accountType: "savings",
-      currency,
-      raw: row
-    });
-    bankBalanceSnapshots.push({
-      accountId,
-      sourceId: `${accountId}:${asOfAt}`,
-      balance: row.amount ?? 0,
-      currency,
-      asOfAt,
-      raw: row
-    });
-
-    console.log(`[esun debug] tw account ${maskAccountNumber(account)} (${row.accountType ?? "401"}): watermark=${watermarks[account] ? "set" : "none"}`);
-    const rows = await fetchAccountTransactionPages(client, account, row.accountType ?? "401", false, watermarks[account], cutoffDateStr);
-    console.log(`[esun debug] tw account ${maskAccountNumber(account)}: fetched ${rows.length} transaction rows`);
-    appendDepositTransactions(bankTransactions, rows, accountId, currency);
-    newWatermarks[account] = watermarks[account];
-  }
-
-  for (const row of (overview.frDetails ?? []).filter((account) => account.account)) {
-    const account = row.account!.trim();
-    const currencies = row.currencyList?.length ? row.currencyList : [{ cur: row.currency, amount: row.amount }];
-    const primaryCurrency = currencies[0]?.cur?.trim() || "USD";
-
-    for (const entry of currencies) {
-      const currency = entry.cur?.trim() || primaryCurrency;
-      const accountId = depositSourceId(account, currency);
-
-      bankAccounts.push({
-        sourceId: accountId,
-        institutionName: "玉山銀行",
-        accountName: `${row.aliasName?.trim() || row.name?.trim() || row.accountTypeName?.trim() || "玉山外幣帳戶"} (${currency})`,
-        accountType: "savings",
-        currency,
-        raw: row
-      });
-      bankBalanceSnapshots.push({
-        accountId,
-        sourceId: `${accountId}:${asOfAt}`,
-        balance: entry.amount ?? 0,
-        currency,
-        asOfAt,
-        raw: row
-      });
-    }
-
-    console.log(`[esun debug] fr account ${maskAccountNumber(account)} (${row.accountType ?? "A01"}): watermark=${watermarks[account] ? "set" : "none"}`);
-    const rows = await fetchAccountTransactionPages(client, account, row.accountType ?? "A01", true, watermarks[account], cutoffDateStr);
-    console.log(`[esun debug] fr account ${maskAccountNumber(account)}: fetched ${rows.length} transaction rows`);
-    for (const detail of rows) {
-      const currency = detail.displayCurrency?.trim() || primaryCurrency;
-      appendDepositTransactions(bankTransactions, [detail], depositSourceId(account, currency), currency);
-    }
-    newWatermarks[account] = watermarks[account];
-  }
-
-  return { bankAccounts, bankBalanceSnapshots, bankTransactions, creditCardBills: [], watermarks: newWatermarks };
-}
-
-async function fetchAccountTransactionPages(
-  client: EsunHttpClient,
-  account: string,
-  accountType: string,
-  isForeign: boolean,
-  watermark: string | undefined,
-  cutoffDateStr: string
-): Promise<EsunTxDetailRow[]> {
-  const rows: EsunTxDetailRow[] = [];
-  let searchKxy = "";
-
-  for (let page = 0; page < 12; page += 1) {
-    const data = await client.postJson<EsunTxDetailsData>(ACCOUNT_TX_URL, {
-      act: JSON.stringify({ act: account, type: accountType, fr: isForeign ? "true" : "false", lna: "0", inh: "0" }),
-      txDateOrder: 1,
-      startRow: 0,
-      searchKxy,
-      counter: 0
-    });
-
-    let reachedCutoff = false;
-    let skippedCutoff = 0;
-    let skippedWatermark = 0;
-    for (const month of data.txMasters ?? []) {
-      for (const detail of month.details ?? []) {
-        const dateStr = detail.txDate?.trim().replace(/-/g, "/") ?? "";
-        if (dateStr && dateStr < cutoffDateStr) {
-          reachedCutoff = true;
-          skippedCutoff++;
-          continue;
-        }
-        if (watermark && txDateTimeKey(detail) <= watermark) {
-          reachedCutoff = true;
-          skippedWatermark++;
-          continue;
-        }
-        rows.push(detail);
-      }
-    }
-    console.log(JSON.stringify({
-      event: "esun_bank_transactions_page",
-      account: maskAccountNumber(account),
-      page,
-      records: rows.length,
-      skippedCutoff,
-      skippedWatermark,
-      hasNextPage: Boolean(data.searchKxy),
-      reachedCutoff
-    }));
-
-    if (reachedCutoff || !data.searchKxy) break;
-    searchKxy = data.searchKxy;
-  }
-
-  return rows;
-}
-
-function appendDepositTransactions(
+export function appendEsunDepositTransactions(
   target: Scraped["bankTransactions"],
   rows: EsunTxDetailRow[],
   accountId: string,
-  defaultCurrency: string
+  defaultCurrency: string,
 ) {
   const occurrences = new Map<string, number>();
 
   for (const detail of rows) {
     const postedDate = normalizeEsunTxDateTime(detail.txDate, detail.txTime);
+    const authorizedAt = normalizeEsunAuthorizedAt(
+      detail.txDate,
+      detail.txTime,
+    );
     const isCredit = detail.showCrFlag !== "hide";
     const amount = parseTwd(detail.amt ?? "0") * (isCredit ? 1 : -1);
     const description = detail.chc?.trim() || "玉山銀行交易";
@@ -783,7 +667,7 @@ function appendDepositTransactions(
       amount,
       detail.balance?.trim() ?? "",
       detail.memo1?.trim() ?? "",
-      detail.memo2?.trim() ?? ""
+      detail.memo2?.trim() ?? "",
     ].join(":");
     const occurrence = (occurrences.get(sourceKey) ?? 0) + 1;
     occurrences.set(sourceKey, occurrence);
@@ -792,11 +676,12 @@ function appendDepositTransactions(
       accountId,
       sourceId: `${sourceKey}:${occurrence}`,
       postedDate,
+      authorizedAt,
       amount,
       currency: detail.displayCurrency?.trim() || defaultCurrency,
       description,
       counterparty,
-      raw: { ...detail, duplicateOccurrence: occurrence }
+      raw: { ...detail, duplicateOccurrence: occurrence },
     });
   }
 }
@@ -809,10 +694,56 @@ function txDateTimeKey(detail: EsunTxDetailRow) {
   return `${detail.txDate ?? ""} ${detail.txTime ?? ""}`;
 }
 
-function normalizeEsunTxDateTime(txDate: string | null | undefined, txTime: string | null | undefined) {
+function normalizeEsunTxDateTime(
+  txDate: string | null | undefined,
+  txTime: string | null | undefined,
+) {
   const date = txDate?.trim().replace(/\//g, "-") || "";
   const time = txTime?.trim() || "00:00:00";
   return `${date}T${time}.000Z`;
+}
+
+/**
+ * Normalizes the source's local Taiwan transaction time for display.
+ *
+ * `postedDate` and its source key intentionally keep the legacy `.000Z`
+ * representation above so a parser precision upgrade cannot create rows.
+ * A missing or malformed time therefore remains a date-only authorizedAt.
+ */
+export function normalizeEsunAuthorizedAt(
+  txDate: string | null | undefined,
+  txTime: string | null | undefined,
+): string | undefined {
+  const date = normalizeEsunDate(txDate);
+  if (!date) return undefined;
+
+  const time = txTime?.trim();
+  if (!time) return date;
+
+  const match = time.match(/^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/);
+  if (!match) return date;
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3] ?? "0");
+  if (hours > 23 || minutes > 59 || seconds > 59) {
+    return date;
+  }
+
+  const fraction = match[4] ? `.${match[4].padEnd(3, "0")}` : "";
+  return `${date}T${String(hours).padStart(2, "0")}:${match[2]}:${String(seconds).padStart(2, "0")}${fraction}+08:00`;
+}
+
+function normalizeEsunDate(
+  value: string | null | undefined,
+): string | undefined {
+  const date = value?.trim().replace(/\//g, "-") ?? "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return undefined;
+  const parsed = new Date(`${date}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) &&
+    parsed.toISOString().startsWith(date)
+    ? date
+    : undefined;
 }
 
 function parseTwd(text: string): number {
@@ -829,36 +760,29 @@ function signedCreditCardAmount(rawAmount: number, description: string) {
   return isCredit ? Math.abs(rawAmount) : -Math.abs(rawAmount);
 }
 
-// Format "0YYYMMDD" where YYY = 民國 year (e.g. "01150629" → "2026/06/29")
-function parseEsunCompactDate(value: string | null | undefined): string | null {
-  const match = value?.match(/^0?(\d{3})(\d{2})(\d{2})$/);
-  if (!match) return null;
-  const year = parseInt(match[1]) + 1911;
-  return `${year}/${match[2]}/${match[3]}`;
-}
-
-// bym6 e.g. 11505 = 民國115年05月 → use last day of that month as the snapshot date
-function parseEsunBym6ToDate(bym6: number): string {
-  const year = Math.floor(bym6 / 100) + 1911;
-  const month = bym6 % 100;
-  const lastDay = new Date(year, month, 0).getDate();
-  return new Date(year, month - 1, lastDay).toISOString();
-}
-
-function readOutstandingBalance(detail: EsunCardDetailData) {
-  if (detail.balance) return parseTwd(detail.balance);
-
-  const latestBill = detail.billList?.find((bill) => bill.payAmt);
-  return latestBill?.payAmt ? parseTwd(latestBill.payAmt) : undefined;
-}
-
 function creditCardSourceId(cardNo: string | null | undefined) {
   const last4 = cardNo?.match(/(\d{4})$/)?.[1];
   return last4 ? `credit:esun:${last4}` : "credit:esun:main";
 }
 
+export function esunCreditBalanceAccountId(
+  physicalCardSourceIds: Iterable<string>,
+) {
+  const accountIds = [
+    ...new Set(
+      [...physicalCardSourceIds].filter(
+        (accountId) => accountId !== "credit:esun:main",
+      ),
+    ),
+  ];
+  return accountIds.length === 1 ? accountIds[0]! : "credit:esun:main";
+}
+
 function normalizeEsunMonthDay(year: string, monthDay: string) {
-  const match = monthDay.trim().replace(/\./g, "/").match(/^(\d{1,2})\/(\d{1,2})$/);
+  const match = monthDay
+    .trim()
+    .replace(/\./g, "/")
+    .match(/^(\d{1,2})\/(\d{1,2})$/);
   if (!match) return monthDay;
 
   const fullYear = year.length === 3 ? Number(year) + 1911 : Number(year);
@@ -876,27 +800,67 @@ function readCursor(cursor: string | undefined): Record<string, unknown> {
   }
 }
 
-class EsunHttpClient {
-  private readonly cookies = new Map<string, string>();
+class EsunHttpClient implements EsunPortalApi {
+  snapshot: EsunSnapshot | null = null;
+  private readonly cookies = new Map<
+    string,
+    EsunBrowserSession["cookies"][number]
+  >();
   private txnDupToken: string | undefined;
+  private portalUuid: string | undefined;
+  private iescAccessToken: string | undefined;
+  private iescRealtimeBody = "{}";
+  private portalFlowToken = "";
+
+  rememberBrowserSession(session: EsunBrowserSession) {
+    this.cookies.clear();
+    for (const cookie of session.cookies) this.storeCookie(cookie);
+    this.portalUuid = session.portalUuid;
+    this.iescAccessToken = session.iescAccessToken;
+    this.iescRealtimeBody = session.iescRealtimeBody || "{}";
+    this.portalFlowToken = "";
+  }
 
   importCookies(serialized: string) {
     try {
       const parsed = JSON.parse(serialized) as unknown;
       if (Array.isArray(parsed)) {
         for (const cookie of parsed) {
-          if (isCookieRecord(cookie)) {
-            this.cookies.set(cookie.name, cookie.value);
-          }
+          const record = readStoredCookie(cookie);
+          if (record) this.storeCookie(record);
         }
         return;
       }
 
-      if (parsed && typeof parsed === "object") {
-        for (const [name, value] of Object.entries(parsed)) {
-          if (typeof value === "string") {
-            this.cookies.set(name, value);
-          }
+      if (!parsed || typeof parsed !== "object") return;
+      const session = parsed as Partial<EsunBrowserSession> & {
+        version?: number;
+      };
+      if (Array.isArray(session.cookies)) {
+        for (const cookie of session.cookies) {
+          const record = readStoredCookie(cookie);
+          if (record) this.storeCookie(record);
+        }
+        if (typeof session.portalUuid === "string") {
+          this.portalUuid = session.portalUuid;
+        }
+        if (typeof session.iescAccessToken === "string") {
+          this.iescAccessToken = session.iescAccessToken;
+        }
+        if (typeof session.iescRealtimeBody === "string") {
+          this.iescRealtimeBody = session.iescRealtimeBody;
+        }
+        return;
+      }
+
+      for (const [name, value] of Object.entries(parsed)) {
+        if (typeof value === "string") {
+          this.storeCookie({
+            name,
+            value,
+            domain: "ebank.esunbank.com.tw",
+            path: "/",
+          });
         }
       }
     } catch {
@@ -905,14 +869,13 @@ class EsunHttpClient {
   }
 
   exportCookies() {
-    return JSON.stringify(
-      Array.from(this.cookies.entries()).map(([name, value]) => ({
-        name,
-        value,
-        domain: "ebank.esunbank.com.tw",
-        path: "/"
-      }))
-    );
+    return JSON.stringify({
+      version: 2,
+      cookies: Array.from(this.cookies.values()),
+      portalUuid: this.portalUuid,
+      iescAccessToken: this.iescAccessToken,
+      iescRealtimeBody: this.iescRealtimeBody,
+    });
   }
 
   setTxnDupToken(token: string) {
@@ -920,48 +883,156 @@ class EsunHttpClient {
   }
 
   async hasAuthenticatedSession() {
-    if (this.cookies.size === 0) {
-      console.log("[esun debug] hasAuthenticatedSession: no stored cookies, will log in");
+    if (!this.portalUuid || !this.iescAccessToken || this.cookies.size === 0) {
+      console.log(
+        "[esun debug] hasAuthenticatedSession: no stored portal session, will log in",
+      );
       return false;
     }
     try {
-      await this.postJson<EsunCardDetailData>(CREDIT_CARD_DETAIL_URL, {
-        detailCategoryId: "03"
-      });
-      console.log("[esun debug] hasAuthenticatedSession: stored session still valid");
+      this.snapshot = await collectEsunSnapshot(this);
+      console.log(
+        "[esun debug] hasAuthenticatedSession: stored session still valid",
+      );
       return true;
     } catch (error) {
-      console.log(`[esun debug] hasAuthenticatedSession: stored session invalid (${error instanceof Error ? error.name : "UNKNOWN_ERROR"}), will log in`);
+      this.snapshot = null;
+      console.log(
+        `[esun debug] hasAuthenticatedSession: stored session invalid (${error instanceof Error ? error.name : "UNKNOWN_ERROR"}), will log in`,
+      );
       return false;
     }
   }
 
+  async postPortal(
+    path: string,
+    requestBody: Record<string, unknown>,
+    resetFlow = false,
+  ) {
+    if (resetFlow) this.portalFlowToken = "";
+    const txnTime = new Date(Date.now() + 28800000)
+      .toISOString()
+      .replace("T", " ")
+      .slice(0, 19);
+    const response = await this.requestJson<{
+      resultCode?: string;
+      resultBody?: unknown;
+      txnFlowToken?: string;
+    }>(new URL(path, PORTAL_URL).toString(), {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        referer: PORTAL_URL,
+        uniqueKey: this.portalUuid ?? "",
+      },
+      body: JSON.stringify({
+        header: {
+          txnTime,
+          txnFlowToken: resetFlow ? "" : this.portalFlowToken,
+        },
+        requestBody,
+      }),
+    });
+    if (response.txnFlowToken) this.portalFlowToken = response.txnFlowToken;
+    return response;
+  }
+
+  async postIesc(path: string, body: Record<string, unknown>) {
+    const response = await this.request(
+      `https://iesc.esunbank.com/GW/${path}`,
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          referer: "https://iesc.esunbank.com/IESC/cardTrans?tab=credit",
+          authorization: `Bearer ${this.iescAccessToken ?? ""}`,
+        },
+        body: JSON.stringify(body),
+      },
+    );
+    const authorization = response.headers.get("authorization");
+    if (authorization) {
+      this.iescAccessToken = authorization.replace(/^Bearer\s+/i, "");
+    }
+    return response.json();
+  }
+
+  async readRealtime() {
+    let body: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(this.iescRealtimeBody) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>;
+      }
+    } catch {
+      body = {};
+    }
+    return {
+      body: this.iescRealtimeBody,
+      payload: await this.postIesc("realTime/getDetailResult", body),
+    };
+  }
+
+  private storeCookie(cookie: EsunBrowserSession["cookies"][number]) {
+    this.cookies.set(`${cookie.domain}|${cookie.name}`, cookie);
+  }
+
   async login(config: EsunConfig) {
     await this.requestText(HOME_URL);
-    const initData = await this.postMobileJson<EsunMobileLoginInitData>("fco08/fco08001/home/initData.json", {});
-    const aesData = await this.getMobileJson<EsunMobileAesData>("sys/loadAesData.do");
-    const e2eData = await this.getMobileJson<EsunMobileE2EData>("sys/loadE2EData.do");
+    const initData = await this.postMobileJson<EsunMobileLoginInitData>(
+      "fco08/fco08001/home/initData.json",
+      {},
+    );
+    const aesData =
+      await this.getMobileJson<EsunMobileAesData>("sys/loadAesData.do");
+    const e2eData =
+      await this.getMobileJson<EsunMobileE2EData>("sys/loadE2EData.do");
 
-    if (!aesData.publickey || !aesData.iv || !aesData.factory || !e2eData.publickey || !e2eData.timefactor) {
-      throw new Error("E.SUN mobile login did not return expected encryption fields.");
+    if (
+      !aesData.publickey ||
+      !aesData.iv ||
+      !aesData.factory ||
+      !e2eData.publickey ||
+      !e2eData.timefactor
+    ) {
+      throw new Error(
+        "E.SUN mobile login did not return expected encryption fields.",
+      );
     }
 
     const payload = {
       custid: config.userId!.toUpperCase(),
-      name: await encryptEsunUsername(config.account!, aesData.publickey, aesData.iv, aesData.factory),
-      pxsswd: encryptEsunPassword(config.password!, e2eData.timefactor, e2eData.publickey),
+      name: await encryptEsunUsername(
+        config.account!,
+        aesData.publickey,
+        aesData.iv,
+        aesData.factory,
+      ),
+      pxsswd: encryptEsunPassword(
+        config.password!,
+        e2eData.timefactor,
+        e2eData.publickey,
+      ),
       magicNumber: "",
       loginType: "GENERAL",
       srcChannel: "MB",
-      targetTaskId: initData.txn ?? undefined
+      targetTaskId: initData.txn ?? undefined,
     };
 
-    let loginResponse = await this.postMobileEnvelope<EsunMobileLoginData>("fco08/fco08001/home/FCO08001_LoginCheck.do", payload);
+    let loginResponse = await this.postMobileEnvelope<EsunMobileLoginData>(
+      "fco08/fco08001/home/FCO08001_LoginCheck.do",
+      payload,
+    );
     if (loginResponse.rsStatus?.code === "9017") {
-      loginResponse = await this.postMobileEnvelope<EsunMobileLoginData>("fco08/fco08001/home/FCO08001_LoginCheck.do", {
-        ...payload,
-        duplicateLogin: "Y"
-      });
+      loginResponse = await this.postMobileEnvelope<EsunMobileLoginData>(
+        "fco08/fco08001/home/FCO08001_LoginCheck.do",
+        {
+          ...payload,
+          duplicateLogin: "Y",
+        },
+      );
     }
 
     this.assertOkStatus(loginResponse.rsStatus, "E.SUN mobile API");
@@ -972,7 +1043,10 @@ class EsunHttpClient {
     }
   }
 
-  async postJson<T>(url: string, rqData: Record<string, unknown> | null): Promise<T> {
+  async postJson<T>(
+    url: string,
+    rqData: Record<string, unknown> | null,
+  ): Promise<T> {
     const response = await this.requestJson<EsunApiResponse<T>>(url, {
       method: "POST",
       headers: {
@@ -980,25 +1054,29 @@ class EsunHttpClient {
         "content-type": "application/json",
         referer: "https://ebank.esunbank.com.tw/indexMobile.jsp",
         txnduptoken: this.txnDupToken ?? "",
-        "x-requested-with": "XMLHttpRequest"
+        "x-requested-with": "XMLHttpRequest",
       },
       body: JSON.stringify({
         clientTime: Date.now(),
-        rqData
-      })
+        rqData,
+      }),
     });
 
     if (response.rsStatus?.code === "3018") {
-      console.log(`[esun debug] ${endpointPath(url)} returned 3018 (no data), treating as empty result`);
+      console.log(
+        `[esun debug] ${endpointPath(url)} returned 3018 (no data), treating as empty result`,
+      );
       return {} as T;
     }
 
     if (response.rsStatus?.code && response.rsStatus.code !== "0000") {
-      console.error(JSON.stringify({
-        event: "esun_api_error",
-        endpoint: endpointPath(url),
-        code: response.rsStatus.code
-      }));
+      console.error(
+        JSON.stringify({
+          event: "esun_api_error",
+          endpoint: endpointPath(url),
+          code: response.rsStatus.code,
+        }),
+      );
       throw new Error(`E.SUN API error ${response.rsStatus.code}.`);
     }
 
@@ -1009,19 +1087,25 @@ class EsunHttpClient {
     return this.mobileRequest<T>(path, { method: "GET" });
   }
 
-  async postMobileJson<T>(path: string, rqData: Record<string, unknown>): Promise<T> {
+  async postMobileJson<T>(
+    path: string,
+    rqData: Record<string, unknown>,
+  ): Promise<T> {
     const response = await this.postMobileEnvelope<T>(path, rqData);
     this.assertOkStatus(response.rsStatus, "E.SUN mobile API");
     return (response.rsData ?? {}) as T;
   }
 
-  async postMobileEnvelope<T>(path: string, rqData: Record<string, unknown>): Promise<EsunApiResponse<T>> {
+  async postMobileEnvelope<T>(
+    path: string,
+    rqData: Record<string, unknown>,
+  ): Promise<EsunApiResponse<T>> {
     return this.mobileEnvelope<T>(path, {
       method: "POST",
       body: JSON.stringify({
         clientTime: Date.now(),
-        rqData
-      })
+        rqData,
+      }),
     });
   }
 
@@ -1032,18 +1116,24 @@ class EsunHttpClient {
     return (response.rsData ?? {}) as T;
   }
 
-  private async mobileEnvelope<T>(path: string, init: RequestInit): Promise<EsunApiResponse<T>> {
-    return this.requestJson<EsunApiResponse<T>>(new URL(path, HOME_URL).toString(), {
-      ...init,
-      headers: {
-        accept: "application/json, text/javascript, */*; q=0.01",
-        "content-type": "application/json",
-        referer: "https://ebank.esunbank.com.tw/indexMobile.jsp",
-        txnduptoken: this.txnDupToken ?? "",
-        "x-requested-with": "XMLHttpRequest",
-        ...init.headers
-      }
-    });
+  private async mobileEnvelope<T>(
+    path: string,
+    init: RequestInit,
+  ): Promise<EsunApiResponse<T>> {
+    return this.requestJson<EsunApiResponse<T>>(
+      new URL(path, HOME_URL).toString(),
+      {
+        ...init,
+        headers: {
+          accept: "application/json, text/javascript, */*; q=0.01",
+          "content-type": "application/json",
+          referer: "https://ebank.esunbank.com.tw/indexMobile.jsp",
+          txnduptoken: this.txnDupToken ?? "",
+          "x-requested-with": "XMLHttpRequest",
+          ...init.headers,
+        },
+      },
+    );
   }
 
   private async requestJson<T>(url: string, init: RequestInit = {}) {
@@ -1051,7 +1141,7 @@ class EsunHttpClient {
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().includes("json")) {
       throw new Error(
-        `E.SUN expected JSON from ${endpointPath(url)}, got ${contentType || "unknown content type"}.`
+        `E.SUN expected JSON from ${endpointPath(url)}, got ${contentType || "unknown content type"}.`,
       );
     }
     return (await response.json()) as T;
@@ -1062,20 +1152,27 @@ class EsunHttpClient {
     return response.text();
   }
 
-  private async request(url: string, init: RequestInit = {}, redirectCount = 0): Promise<Response> {
+  private async request(
+    url: string,
+    init: RequestInit = {},
+    redirectCount = 0,
+  ): Promise<Response> {
     const headers = new Headers(init.headers);
-    headers.set("user-agent", "Mozilla/5.0 AppleWebKit/537.36 Chrome/147 Safari/537.36");
+    headers.set(
+      "user-agent",
+      "Mozilla/5.0 AppleWebKit/537.36 Chrome/147 Safari/537.36",
+    );
     headers.set("accept-language", "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7");
     if (this.cookies.size > 0) {
-      headers.set("cookie", this.cookieHeader());
+      headers.set("cookie", this.cookieHeader(url));
     }
 
     const response = await fetch(url, {
       ...init,
       headers,
-      redirect: "manual"
+      redirect: "manual",
     });
-    this.storeSetCookies(response.headers);
+    this.storeSetCookies(response.headers, url);
     const txnDupToken = response.headers.get("txnduptoken");
     if (txnDupToken) {
       this.txnDupToken = txnDupToken;
@@ -1087,7 +1184,11 @@ class EsunHttpClient {
       }
       const location = response.headers.get("location");
       if (!location) return response;
-      return this.request(new URL(location, url).toString(), { method: "GET" }, redirectCount + 1);
+      return this.request(
+        new URL(location, url).toString(),
+        { method: "GET" },
+        redirectCount + 1,
+      );
     }
 
     if (!response.ok) {
@@ -1097,11 +1198,16 @@ class EsunHttpClient {
     return response;
   }
 
-  private cookieHeader() {
-    return Array.from(this.cookies.entries()).map(([name, value]) => `${name}=${value}`).join("; ");
+  private cookieHeader(url: string) {
+    const host = new URL(url).hostname;
+    return Array.from(this.cookies.values())
+      .filter((cookie) => host.endsWith(cookie.domain.replace(/^\./, "")))
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
   }
 
-  private storeSetCookies(headers: Headers) {
+  private storeSetCookies(headers: Headers, url: string) {
+    const host = new URL(url).hostname;
     const values = getSetCookieValues(headers);
     for (const value of values) {
       const [pair] = value.split(";");
@@ -1109,43 +1215,83 @@ class EsunHttpClient {
       if (separator <= 0) continue;
       const name = pair.slice(0, separator).trim();
       const cookieValue = pair.slice(separator + 1).trim();
+      const existing = Array.from(this.cookies.values()).find(
+        (cookie) =>
+          cookie.name === name &&
+          host.endsWith(cookie.domain.replace(/^\./, "")),
+      );
+      const key = `${existing?.domain || host}|${name}`;
       if (cookieValue) {
-        this.cookies.set(name, cookieValue);
+        this.cookies.set(key, {
+          name,
+          value: cookieValue,
+          domain: existing?.domain || host,
+          path: existing?.path || "/",
+        });
       } else {
-        this.cookies.delete(name);
+        this.cookies.delete(key);
       }
     }
   }
 
-  private assertOkStatus(status: EsunApiStatus | null | undefined, label: string) {
+  private assertOkStatus(
+    status: EsunApiStatus | null | undefined,
+    label: string,
+  ) {
     if (status?.code && status.code !== "0000") {
-      throw new Error(`${label} error ${status.code}: ${status.message ?? ""}`.trim());
+      throw new Error(
+        `${label} error ${status.code}: ${status.message ?? ""}`.trim(),
+      );
     }
   }
 }
 
-async function encryptEsunUsername(username: string, base64Key: string, base64Iv: string, factory: string) {
+async function encryptEsunUsername(
+  username: string,
+  base64Key: string,
+  base64Iv: string,
+  factory: string,
+) {
   const key = base64ToBytes(base64Key);
   const iv = base64ToBytes(base64Iv);
-  const encrypted = Buffer.from(await aesCbcPkcs7Encrypt(username, key, iv)).toString("base64");
+  const encrypted = Buffer.from(
+    await aesCbcPkcs7Encrypt(username, key, iv),
+  ).toString("base64");
   return `${encrypted}__${factory}`;
 }
 
-function encryptEsunPassword(password: string, serverTime: string, publicKey: string) {
+function encryptEsunPassword(
+  password: string,
+  serverTime: string,
+  publicKey: string,
+) {
   const payload = `${password}${serverTime}`;
-  const encrypted = rsaPkcs1v15Encrypt(publicKey, new TextEncoder().encode(payload));
+  const encrypted = rsaPkcs1v15Encrypt(
+    publicKey,
+    new TextEncoder().encode(payload),
+  );
   return `${password.length},${encrypted.toString("base64")}`;
 }
 
-async function aesCbcPkcs7Encrypt(value: string, key: Uint8Array<ArrayBuffer>, iv: Uint8Array<ArrayBuffer>) {
-  const cryptoKey = await crypto.subtle.importKey("raw", key.buffer, "AES-CBC", false, ["encrypt"]);
+async function aesCbcPkcs7Encrypt(
+  value: string,
+  key: Uint8Array<ArrayBuffer>,
+  iv: Uint8Array<ArrayBuffer>,
+) {
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    key.buffer,
+    "AES-CBC",
+    false,
+    ["encrypt"],
+  );
   return crypto.subtle.encrypt(
     {
       name: "AES-CBC",
-      iv
+      iv,
     },
     cryptoKey,
-    new TextEncoder().encode(value)
+    new TextEncoder().encode(value),
   );
 }
 
@@ -1180,7 +1326,7 @@ function parseRsaPublicKey(publicKeyPem: string) {
     publicKeyPem
       .replace(/-----BEGIN RSA PUBLIC KEY-----/g, "")
       .replace(/-----END RSA PUBLIC KEY-----/g, "")
-      .replace(/\s+/g, "")
+      .replace(/\s+/g, ""),
   );
   const root = readDerNode(der, 0);
   const rootChildren = readDerChildren(root.value);
@@ -1195,7 +1341,7 @@ function parseRsaPublicKey(publicKeyPem: string) {
 
   return {
     modulus: bytesToBigInt(stripLeadingZero(modulusNode.value)),
-    exponent: bytesToBigInt(stripLeadingZero(exponentNode.value))
+    exponent: bytesToBigInt(stripLeadingZero(exponentNode.value)),
   };
 }
 
@@ -1234,7 +1380,7 @@ function readDerNode(bytes: Uint8Array, offset: number): DerNode {
   return {
     tag,
     value: bytes.slice(cursor, cursor + length),
-    nextOffset: cursor + length
+    nextOffset: cursor + length,
   };
 }
 
@@ -1243,7 +1389,9 @@ function stripLeadingZero(bytes: Uint8Array) {
 }
 
 function bytesToBigInt(bytes: Uint8Array) {
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
   return BigInt(`0x${hex || "0"}`);
 }
 
@@ -1298,7 +1446,13 @@ function nonZeroRandomBytes(length: number) {
 }
 
 function isRedirect(status: number) {
-  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+  return (
+    status === 301 ||
+    status === 302 ||
+    status === 303 ||
+    status === 307 ||
+    status === 308
+  );
 }
 
 function getSetCookieValues(headers: Headers) {
@@ -1312,16 +1466,42 @@ function getSetCookieValues(headers: Headers) {
 }
 
 function splitCombinedSetCookie(value: string) {
-  return value.split(/,(?=\s*[^;,=]+=[^;,]+)/g).map((cookie) => cookie.trim()).filter(Boolean);
+  return value
+    .split(/,(?=\s*[^;,=]+=[^;,]+)/g)
+    .map((cookie) => cookie.trim())
+    .filter(Boolean);
 }
 
-function isCookieRecord(value: unknown): value is { name: string; value: string } {
+function readStoredCookie(
+  value: unknown,
+): EsunBrowserSession["cookies"][number] | null {
+  if (!isCookieRecord(value)) return null;
+  const record = value as {
+    name: string;
+    value: string;
+    domain?: unknown;
+    path?: unknown;
+  };
+  return {
+    name: record.name,
+    value: record.value,
+    domain:
+      typeof record.domain === "string"
+        ? record.domain
+        : "ebank.esunbank.com.tw",
+    path: typeof record.path === "string" ? record.path : "/",
+  };
+}
+
+function isCookieRecord(
+  value: unknown,
+): value is { name: string; value: string } {
   return Boolean(
     value &&
-      typeof value === "object" &&
-      "name" in value &&
-      "value" in value &&
-      typeof value.name === "string" &&
-      typeof value.value === "string"
+    typeof value === "object" &&
+    "name" in value &&
+    "value" in value &&
+    typeof value.name === "string" &&
+    typeof value.value === "string",
   );
 }

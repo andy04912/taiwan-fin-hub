@@ -47,6 +47,18 @@ function bill(period: string) {
 const result = parseTaishinCreditCardData(
   {
     summary,
+    overview: {
+      value: {
+        carInfoList: {
+          "001": {
+            BillYear: "2026",
+            BillMon: "07",
+            StmtBalance: "$10,060",
+            LstPymtAmt: "$10,060",
+          },
+        },
+      },
+    },
     bills: [
       bill("2026/07"),
       bill("2026/06"),
@@ -78,14 +90,13 @@ const result = parseTaishinCreditCardData(
       error: null,
     },
   },
-  6,
   new Date("2026-07-23T00:00:00.000Z"),
 );
 
 assert.equal(result.bankAccounts.length, 1);
 assert.equal(result.bankAccounts[0]?.creditLimit, 200000);
 assert.equal(result.bankBalanceSnapshots[0]?.statementBalance, 10060);
-assert.equal(result.creditCardBills.length, 6);
+assert.equal(result.creditCardBills.length, 3);
 assert.equal(
   result.bankTransactions.filter(({ status }) => status === "posted").length,
   6,
@@ -93,6 +104,15 @@ assert.equal(
 assert.equal(
   result.bankTransactions.find(({ status }) => status === "pending")?.amount,
   -1404,
+);
+assert.equal(
+  result.bankTransactions.find(
+    (transaction) =>
+      transaction.description === "測試商店" &&
+      transaction.amount === -350 &&
+      transaction.authorizedAt?.includes("12:30:00"),
+  )?.authorizedAt,
+  "2026-07-08T12:30:00+08:00",
 );
 assert.doesNotMatch(JSON.stringify(result), /A123456789|4111111111113108/);
 

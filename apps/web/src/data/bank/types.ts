@@ -10,11 +10,13 @@ export interface BankAccountRow {
   currency: string;
   bankCode?: string;
   accountLast4?: string;
-  balance?: number;
+  balance?: number | null;
   availableBalance?: number;
   paymentDueDate?: string;
   statementClosingDate?: string;
   asOfAt?: string;
+  openedDate?: string;
+  maturityDate?: string;
 }
 
 export interface BankTransactionRow {
@@ -39,7 +41,13 @@ export interface BankTransactionRow {
   classification?: {
     categoryId: string;
     label: string;
-    source: "override" | "user_rule" | "system_rule" | "fallback";
+    source:
+      | "override"
+      | "user_rule"
+      | "system_rule"
+      | "auto_transfer"
+      | "auto_offset"
+      | "fallback";
     ruleId?: string;
     excludedFromCalculation?: boolean;
   };

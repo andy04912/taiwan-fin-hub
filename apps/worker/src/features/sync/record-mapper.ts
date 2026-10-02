@@ -17,35 +17,6 @@ function stableId(...parts: string[]) {
   return parts.join(":");
 }
 
-export function invoiceConfigSnapshot(config: Record<string, unknown>) {
-  return Object.fromEntries(
-    [
-      "protocol",
-      "fetchDetails",
-      "mobileBarcode",
-      "userToken",
-      "loginClientCode",
-      "sid",
-      "token",
-      "iv",
-      "svrCode",
-      "loginAppId",
-      "loginLiat",
-      "loginSsMe",
-      "ltoken",
-      "hkey",
-      "serverTimeOffset",
-    ].map((key) => [key, config[key]]),
-  );
-}
-
-export function invoiceConfigChanged(
-  before: Record<string, unknown>,
-  after: Record<string, unknown>,
-) {
-  return Object.keys(before).some((key) => before[key] !== after[key]);
-}
-
 export function invoiceRecord(
   connectorId: ConnectorId,
   invoice: Omit<Invoice, "id" | "connectorId">,
@@ -117,6 +88,9 @@ export function bankAccountRecord(
       account_type: account.accountType ?? null,
       currency: account.currency || "TWD",
       credit_limit: account.creditLimit ?? null,
+      opened_date: account.openedDate ?? null,
+      maturity_date: account.maturityDate ?? null,
+      inactive_at: account.inactiveAt ?? null,
       bank_code: bankCode,
       account_last4: last4,
       raw_payload: JSON.stringify(account.raw ?? account),
@@ -183,6 +157,13 @@ export function bankTransactionRecord(
       description: transaction.description ?? null,
       counterparty: transaction.counterparty ?? null,
       status: transaction.status ?? "posted",
+      transfer_peer_id: transaction.transferPeer
+        ? stableId(
+            connectorId,
+            transaction.transferPeer.accountId,
+            transaction.transferPeer.sourceId,
+          )
+        : null,
       raw_payload: JSON.stringify(transaction.raw ?? transaction),
       created_at: now,
       updated_at: now,
